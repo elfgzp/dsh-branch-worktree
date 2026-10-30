@@ -1,0 +1,5 @@
+# Bundle layer for the branch/worktree New-Session control: one Host row that
+# owns the Git routes, and its browser half declared through `dsh.client`.
+- insert:
+    - id: branch-worktree
+      name: 'dsh-branch-worktree'

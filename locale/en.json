@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Branch & Worktree",
+    "description": "Pick a Git branch on the New Session screen and start the conversation inside an automatically created worktree."
+  }
+}

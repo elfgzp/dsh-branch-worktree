@@ -1,0 +1,54 @@
+{
+  "name": "dsh-branch-worktree",
+  "version": "1.0.0",
+  "description": "Pick a Git branch (or create one) on the DeepSeek Harness New Session screen and start the conversation inside an automatically created worktree.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "git",
+    "worktree",
+    "branch"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elfgzp/dsh-branch-worktree.git"
+  },
+  "homepage": "https://github.com/elfgzp/dsh-branch-worktree#readme",
+  "bugs": {
+    "url": "https://github.com/elfgzp/dsh-branch-worktree/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.zh.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

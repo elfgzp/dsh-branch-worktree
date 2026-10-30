@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "分支与 Worktree",
+    "description": "在新会话界面选择 Git 分支，并自动创建 worktree 后在其中开始对话。"
+  }
+}
