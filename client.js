@@ -4,7 +4,13 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
-    const { Menu, Button, Switch, IconBranchOutlineRegular } = primitives
+    const {
+      Menu,
+      Button,
+      Switch,
+      IconBranchOutlineRegular,
+      IconWorkspaceTreeOutlineRegular,
+    } = primitives
 
     /** Locale namespace owned by this plugin. */
     const NS = 'branch-worktree'
@@ -16,6 +22,9 @@ window.__ModuleLoader__.load({
     const DICTS = {
       en: {
         chip: 'Branch',
+        badgeWorktree: 'worktree',
+        chipWorktreeTitle: 'Branch {branch} · a worktree is created when the session starts',
+        chipBranchTitle: 'Branch {branch} · switched in place, no worktree',
         branchLabel: 'Branch',
         newBranchLabel: 'New branch',
         newBranchPlaceholder: 'or type a new branch name',
@@ -40,6 +49,9 @@ window.__ModuleLoader__.load({
       },
       zh: {
         chip: '分支',
+        badgeWorktree: 'worktree',
+        chipWorktreeTitle: '分支 {branch} · 开始时自动创建 worktree',
+        chipBranchTitle: '分支 {branch} · 原地切换，不创建 worktree',
         branchLabel: '分支',
         newBranchLabel: '新建分支',
         newBranchPlaceholder: '或输入新分支名',
@@ -94,11 +106,32 @@ window.__ModuleLoader__.load({
         cursor: 'pointer',
         minWidth: 0,
       },
+      /**
+       * Worktree mode has to be legible from the row itself, without opening
+       * the dropdown: the chip keeps a filled surface and a brand-tinted
+       * outline for as long as the worktree switch is on.
+       */
+      chipWorktree: {
+        background: 'var(--dsw-alias-bg-layer-2)',
+        boxShadow: 'inset 0 0 0 0.5px var(--dsw-alias-border-l2)',
+      },
       chipLabel: {
         minWidth: 0,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
+      },
+      /** Small uppercase marker that names the active checkout strategy. */
+      badge: {
+        flex: 'none',
+        padding: '0 5px',
+        borderRadius: 6,
+        background: 'var(--dsw-alias-brand-primary)',
+        color: 'var(--dsw-alias-bg-base)',
+        fontSize: 10,
+        lineHeight: '15px',
+        fontWeight: 600,
+        letterSpacing: '0.02em',
       },
       panel: { display: 'grid', gap: 8, minWidth: 288, padding: '10px 12px 12px' },
       field: { display: 'grid', gap: 4, minWidth: 0 },
@@ -309,7 +342,11 @@ window.__ModuleLoader__.load({
 
         const repo = status.phase === 'ready' ? status.repo : undefined
         const shown = repo === undefined ? undefined : (branch !== '' ? branch : repo.currentBranch)
-        const chipTitle = shown === undefined ? t('chip') : `${t('chip')}: ${shown}`
+        const chipTitle = shown === undefined
+          ? t('chip')
+          : worktree
+            ? t('chipWorktreeTitle', { branch: shown })
+            : t('chipBranchTitle', { branch: shown })
         const typed = newBranch.trim()
         const target = typed !== '' ? typed : branch
         const targetExists = repo !== undefined && repo.branches.some((item) => item.name === target)
@@ -414,19 +451,27 @@ window.__ModuleLoader__.load({
           ]),
         ]
 
+        // The chip states the checkout strategy it will use. Worktree mode gets
+        // a filled surface, a tree icon and a `worktree` badge, so the mode is
+        // readable from the row without opening the dropdown.
         const anchor = h('button', {
           type: 'button',
           'aria-haspopup': 'menu',
           'aria-expanded': open,
+          'aria-label': chipTitle,
           title: chipTitle,
+          'data-worktree': worktree ? 'on' : 'off',
           disabled: status.phase === 'loading',
           onClick: () => { setFailure(null); setOpen((value) => !value) },
-          style: S.chip,
+          style: worktree ? { ...S.chip, ...S.chipWorktree } : S.chip,
           onMouseEnter: (event) => { event.currentTarget.style.background = 'var(--dsw-alias-bg-layer-2)' },
-          onMouseLeave: (event) => { event.currentTarget.style.background = 'transparent' },
+          onMouseLeave: (event) => {
+            event.currentTarget.style.background = worktree ? 'var(--dsw-alias-bg-layer-2)' : 'transparent'
+          },
         }, [
-          h(IconBranchOutlineRegular, { key: 'icon', size: 16 }),
+          h(worktree ? IconWorkspaceTreeOutlineRegular : IconBranchOutlineRegular, { key: 'icon', size: 16 }),
           h('span', { key: 'label', style: S.chipLabel }, shown ?? t('chip')),
+          worktree ? h('span', { key: 'badge', style: S.badge }, t('badgeWorktree')) : null,
         ])
 
         // A workspace outside a Git repository has no branches: render nothing
