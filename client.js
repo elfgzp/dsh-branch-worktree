@@ -23,8 +23,6 @@ window.__ModuleLoader__.load({
       en: {
         chip: 'Branch',
         badgeWorktree: 'worktree',
-        chipWorktreeTitle: 'Branch {branch} · a worktree is created when the session starts',
-        chipBranchTitle: 'Branch {branch} · switched in place, no worktree',
         branchLabel: 'Branch',
         newBranchLabel: 'New branch',
         newBranchPlaceholder: 'or type a new branch name',
@@ -50,8 +48,6 @@ window.__ModuleLoader__.load({
       zh: {
         chip: '分支',
         badgeWorktree: 'worktree',
-        chipWorktreeTitle: '分支 {branch} · 开始时自动创建 worktree',
-        chipBranchTitle: '分支 {branch} · 原地切换，不创建 worktree',
         branchLabel: '分支',
         newBranchLabel: '新建分支',
         newBranchPlaceholder: '或输入新分支名',
@@ -342,11 +338,7 @@ window.__ModuleLoader__.load({
 
         const repo = status.phase === 'ready' ? status.repo : undefined
         const shown = repo === undefined ? undefined : (branch !== '' ? branch : repo.currentBranch)
-        const chipTitle = shown === undefined
-          ? t('chip')
-          : worktree
-            ? t('chipWorktreeTitle', { branch: shown })
-            : t('chipBranchTitle', { branch: shown })
+        const chipTitle = shown === undefined ? t('chip') : `${t('chip')}: ${shown}`
         const typed = newBranch.trim()
         const target = typed !== '' ? typed : branch
         const targetExists = repo !== undefined && repo.branches.some((item) => item.name === target)
