@@ -35,7 +35,7 @@ This plugin closes that gap with one extra chip:
 - **Branches already checked out elsewhere are shown, not offered** — they are disabled in the picker with an `in use` marker, because Git refuses to check out the same branch twice.
 - **The worktree pool stays out of `git status`** — the first run appends `.worktrees/` to `.git/info/exclude`.
 - **Unsent draft is carried over** — if you already typed a prompt, it moves with you into the new session, and it also seeds the generated name.
-- **Not a Git repository? The chip disappears** instead of offering a dialog that cannot do anything.
+- **Not a Git repository? The chip disappears** instead of offering a dialog that cannot do anything — and it **comes back** as soon as you switch to a workspace that is a repository. (A directory outside Git answers the probe with a reduced `isRepo: false` payload; the client treats that as "hide the chip", never as a repository to render.)
 
 The worktree layout it produces:
 

@@ -294,6 +294,12 @@ window.__ModuleLoader__.load({
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'inspect-failed', '')
       if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
+      // A directory outside a Git repository still answers 200, but with a
+      // reduced payload (`isRepo: false`, no branches/worktrees). Treat that
+      // as "not a repo" here rather than letting it through as `ready`; the
+      // panel maps arrays off that payload, and a missing `branches` would
+      // crash the whole slot entry (which never recovers without a reload).
+      if (payload.isRepo !== true) throw httpError(response.status, 'not-a-repo', '')
       return payload
     }
 
@@ -401,6 +407,9 @@ window.__ModuleLoader__.load({
 
         const repo = status.phase === 'ready' ? status.repo : undefined
         const typed = newBranch.trim()
+        // Branch lists come from the Host over HTTP. Guard them so a reduced or
+        // stale payload can never take down the whole hero slot.
+        const branches = Array.isArray(repo?.branches) ? repo.branches : []
 
         /**
          * Refresh the name the automatic mode would generate.
@@ -436,7 +445,7 @@ window.__ModuleLoader__.load({
           ? (preview === null ? undefined : preview.branch)
           : (repo === undefined ? undefined : (branch !== '' ? branch : repo.currentBranch))
         const chipTitle = shown === undefined ? t('chip') : `${t('chip')}: ${shown}`
-        const targetExists = repo !== undefined && !autoName && repo.branches.some((item) => item.name === target)
+        const targetExists = repo !== undefined && !autoName && branches.some((item) => item.name === target)
 
         const submit = async () => {
           if (repo === undefined || creating || (target === '' && !autoName)) return
@@ -505,7 +514,7 @@ window.__ModuleLoader__.load({
               },
             }, repo === undefined
               ? [h('option', { key: 'loading' }, t('loading'))]
-              : repo.branches.map((item) => h('option', {
+              : branches.map((item) => h('option', {
                 key: item.name,
                 value: item.name,
                 disabled: item.current !== true && item.checkedOutAt !== null && item.checkedOutAt !== undefined,
@@ -538,7 +547,7 @@ window.__ModuleLoader__.load({
               value: base,
               disabled: creating,
               onChange: (event) => { setBase(event.target.value) },
-            }, repo.branches.map((item) => h('option', { key: item.name, value: item.name }, item.name))),
+            }, branches.map((item) => h('option', { key: item.name, value: item.name }, item.name))),
           ]) : null,
           repo === undefined || autoName ? null : h('p', { key: 'state', style: S.hint },
             typed !== '' ? t('newBranchHint') : targetExists ? t('reuseHint') : ''),
