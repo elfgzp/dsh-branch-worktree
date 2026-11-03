@@ -1,7 +1,7 @@
 {
   "name": "dsh-branch-worktree",
-  "version": "1.0.0",
-  "description": "Pick a Git branch (or create one) on the DeepSeek Harness New Session screen and start the conversation inside an automatically created worktree.",
+  "version": "1.1.0",
+  "description": "Pick a Git branch — or let the plugin name one for you — on the DeepSeek Harness New Session screen and start the conversation inside an automatically created worktree.",
   "type": "module",
   "license": "MIT",
   "keywords": [

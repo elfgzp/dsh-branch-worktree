@@ -27,13 +27,14 @@ This plugin closes that gap with one extra chip:
 
 - **Sits between the workspace and agent-mode chips** — the row reads project → branch → mode, which is exactly the order in which those decisions are made.
 - **Opens as a dropdown, not a modal** — the composer stays visible and usable behind it.
-- **Pick an existing branch, or type a new name** — a new branch is created from the base you choose (defaults to the repository's own default); an existing branch is reused instead of being recreated.
+- **Names itself by default** — with the worktree switch already on, the panel opens ready to go: the plugin generates both the branch name and the worktree directory name, previews them, and creates exactly what it previewed. Start a session without typing a branch name at all.
+- **Pick an existing branch, or type a new name** — turn automatic naming off to choose the branch yourself. A new branch is created from the base you choose (defaults to the repository's own default); an existing branch is reused instead of being recreated.
 - **Toggles between two modes:**
   - **Create a worktree** (default) — `git worktree add` under `<repo>/.worktrees/<branch>`, then registers that directory as a DSH Workspace and starts the session there. Your current checkout is never touched, so uncommitted work stays exactly where it was.
   - **Switch in place** — `git checkout` the branch in the current checkout. Refused when the tree is dirty, so it can never clobber your changes.
 - **Branches already checked out elsewhere are shown, not offered** — they are disabled in the picker with an `in use` marker, because Git refuses to check out the same branch twice.
 - **The worktree pool stays out of `git status`** — the first run appends `.worktrees/` to `.git/info/exclude`.
-- **Unsent draft is carried over** — if you already typed a prompt, it moves with you into the new session.
+- **Unsent draft is carried over** — if you already typed a prompt, it moves with you into the new session, and it also seeds the generated name.
 - **Not a Git repository? The chip disappears** instead of offering a dialog that cannot do anything.
 
 The worktree layout it produces:
@@ -89,11 +90,24 @@ Then install that absolute directory through **Plugins → Add plugin → Instal
 
 1. Click **New Session**.
 2. Choose your workspace, then click the **branch chip** in the middle.
-3. In the dropdown, pick an existing branch, or type a name under *New branch* — a *based on* picker then appears.
-4. Leave **Create worktree** on (the default), or turn it off to switch your current checkout instead.
+3. Press **Start here** straight away — automatic naming and the worktree switch are both on by default, so the branch and worktree names are generated for you.
+4. To name things yourself, turn **Auto name** off, then pick an existing branch or type a name under *New branch* — a *based on* picker then appears.
 5. Press **Start here** (or hit Enter in the name field).
 
 The session opens in the resulting directory, and the workspace appears in the sidebar under the branch name.
+
+### Automatic naming
+
+This is the default: **open the panel, press Start, done.**
+
+- Generated branches live under a `wt/` namespace, so they are easy to tell apart from branches you named yourself.
+- The name comes from the **draft prompt you already typed**: "fix the login crash" becomes `wt/fix-the-login-crash`. Without a usable draft it falls back to a timestamp, such as `wt/20261103-153102`.
+- A non-ASCII draft (Chinese, for example) is not transliterated; the timestamp fallback is used instead, so generated refs stay legal and readable.
+- Collisions are suffixed automatically (`wt/fix-the-login-crash-2`), checking both branches and `.worktrees/` directories.
+- The panel **previews the name and path** under *Will create* before you commit, so automatic never means opaque.
+- What is previewed is what is created: the displayed name is sent to the Host verbatim.
+
+Turn **Auto name** off to get exactly the manual behavior described below.
 
 ### What the worktree toggle actually does
 
@@ -101,11 +115,15 @@ This is the part that is easy to misread: **"Create worktree" does not imply "cr
 
 | The branch name you give | What runs |
 |---|---|
+| **Automatic** (default) | Generates an unused `wt/…` branch and runs `git worktree add -b` — **creates the branch** in a new worktree |
 | **Does not exist** | `git worktree add -b <branch> <path> <base>` — **creates the branch** and checks it out in the new worktree |
 | **Already exists** | `git worktree add <path> <branch>` — **reuses the branch**, creating nothing |
 | **Checked out in another worktree** | Refused, because Git will not check out the same branch twice |
+| **Checked out in the main working copy** | Refused, instead of handing the main checkout back as if it were a worktree |
 
-So a new name starts a new branch, an existing name reuses one, and you never get a surprise duplicate. The dropdown says which of the two is about to happen before you commit to it.
+That last row matters: previously, selecting the current branch with the worktree switch on returned the main checkout itself (`reusedWorktree: true`) — the switch appeared to work while isolating nothing. That combination is now an explicit error, so the switch means what it says.
+
+So a new name starts a new branch, an existing name reuses one, and you never get a surprise duplicate or a silently skipped worktree. The dropdown says which path is about to be taken before you commit to it.
 
 ### What happens on disk
 
@@ -136,6 +154,7 @@ git branch -d feature/login
 | This workspace is not inside a Git repository. | The selected workspace has no `.git`; the chip would not have been shown if this was known up front. |
 | Branch names accept letters, digits and `. _ / -` only. | The typed branch name is not a valid Git ref. |
 | That branch is already checked out in another worktree. | Git will not check out the same branch twice. Pick another branch, or create a new one. |
+| That branch is checked out in your main working copy. | The main checkout is not a worktree, so it cannot be isolated. Pick another branch, or turn automatic naming on. |
 | A worktree directory with that name already exists. | A stale directory is in the way at `.worktrees/<branch>`. Remove it with `git worktree prune` or by hand. |
 | Your current checkout has uncommitted changes. | You turned the worktree option off while the tree was dirty. Turn it back on, or commit/stash first. |
 | Git refused the operation. | Any other Git failure; the Git message is shown in the dialog. |
@@ -153,6 +172,7 @@ git branch -d feature/login
 ┌──────────────────────── Host (index.js) ────────────────────────────┐
 │  connection.requestRejection()  ← trust fence, before anything else │
 │  /branch-worktree/inspect  → repo, branches, worktrees, dirty state │
+│  /branch-worktree/suggest  → branch + path automatic mode would make│
 │  /branch-worktree/create   → git worktree add | git checkout        │
 │                            → workspaceRegistry.create(path)         │
 └─────────────────────────────────────────────────────────────────────┘
@@ -170,7 +190,7 @@ Two details are worth knowing:
 
 | Half | Surface |
 |---|---|
-| Host | `webServer` exact routes `/branch-worktree/inspect`, `/branch-worktree/create` |
+| Host | `webServer` exact routes `/branch-worktree/inspect`, `/branch-worktree/suggest`, `/branch-worktree/create` |
 | Client | `conversation.hero.options` (list slot), id `branch-worktree`, order `-10` |
 
 On sitting *between* the workspace and agent-mode chips: DSH ships **no slot** in that position. `conversation.hero.workspace` and `conversation.hero.agentPreset` are `display: contents` wrappers, and the only slot meant for extra controls — `conversation.hero.options` — is right-aligned at the end of the row. The plugin therefore injects a small scoped stylesheet that makes that container `display: contents` and uses `order` to place itself between the two shipped chips. The selectors are `:has()`-scoped to the New Session row, so conversation views are untouched, no other plugin's nodes are moved, and the block becomes irrelevant the day DSH grows a real slot there.

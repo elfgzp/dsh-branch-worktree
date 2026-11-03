@@ -85,11 +85,24 @@ cd dsh-branch-worktree
 
 1. 点 **新建会话**。
 2. 照常选工作区，然后点中间的**分支 chip**。
-3. 在下拉里选一个已有分支，或者在「新建分支」里输入名字——此时会多出「基于」选择器。
-4. 保留 **创建 worktree** 开关（默认开），或关掉它改为原地切换。
+3. 直接点 **从这里开始** 就行——默认已经开了 **自动命名 + 创建 worktree**，分支名和 worktree 名都由插件生成。
+4. 想自己指定名字时，关掉 **自动命名**，然后在「分支」里选已有分支，或在「新建分支」里输入新名字（此时会多出「基于」选择器）。
 5. 点 **从这里开始**（或在输入框里按 Enter）。
 
 会话在生成的目录里打开，侧边栏会以分支名出现一个新工作区分组。
+
+### 自动命名
+
+这是默认行为：**打开面板什么都不用填，直接开始**。
+
+- 生成的分支名统一放在 `wt/` 命名空间下，一眼能和你自己起的分支区分开。
+- 名字优先取自你**已经输入但还没发送的草稿**：写「fix the login crash」会得到 `wt/fix-the-login-crash`；没有可用的 ASCII 草稿时退回时间戳，如 `wt/20261103-153102`。
+- 草稿是中文等非 ASCII 内容时不硬转，直接走时间戳，避免生成不合法或难读的 ref。
+- 撞名自动加序号（`wt/fix-the-login-crash-2`），分支和 `.worktrees/` 目录都会检查。
+- **生成前会实时预览**面板里的「将创建」一栏，显示最终分支名和磁盘路径——自动不等于黑盒，看清楚再点开始。
+- 生成什么就创建什么：预览显示的名字会被原样传给 Host 执行，不会出现「预览一个、实际建另一个」。
+
+关掉 **自动命名** 就回到手动模式，规则和以前完全一致。
 
 ### 勾选 worktree 之后到底做了什么
 
@@ -97,11 +110,15 @@ cd dsh-branch-worktree
 
 | 你输入的分支名 | 执行的动作 |
 |---|---|
+| **自动命名**（默认） | 生成一个不存在的 `wt/...` 分支，`git worktree add -b` 新建并检出到新 worktree |
 | **不存在** | `git worktree add -b <分支> <路径> <base>` — **新建分支**并检出到新 worktree |
 | **已存在** | `git worktree add <路径> <分支>` — **复用已有分支**，不新建 |
 | **已在别的 worktree 检出** | 直接报错，因为 Git 不允许同一分支被检出两次 |
+| **就在主工作区检出** | 直接报错，不会把主工作区当成 worktree 交回给你 |
 
-所以：起个新名字就是开新分支，选个已有分支就是复用；绝不会悄悄给你造一个同名分支。下拉面板里也会实时提示当前会走哪条路径。
+最后一行是重点：过去选当前分支并开着 worktree 开关时，插件会把主检出目录直接返回（`reusedWorktree: true`），开关看起来生效、实际完全没隔离。现在这种组合会明确报错，让你换分支——开关说要做隔离，就真的做隔离。
+
+所以：起个新名字就是开新分支，选个已有分支就是复用；绝不会悄悄给你造一个同名分支，也不会悄悄跳过 worktree。下拉面板里也会实时提示当前会走哪条路径。
 
 ### 磁盘上发生了什么
 
@@ -132,6 +149,7 @@ git branch -d feature/login
 | 这个工作区不在 Git 仓库内。 | 所选工作区没有 `.git`；正常情况下提前探知的话 chip 不会显示。 |
 | 分支名只能包含字母、数字和 `. _ / -`。 | 输入的分支名不是合法 Git ref。 |
 | 该分支已经在另一个 worktree 中检出。 | Git 不允许同一分支检出两次。换一个分支，或新建分支。 |
+| 该分支就在主工作区里检出。 | 主检出不等于 worktree，无法隔离。换一个分支，或打开自动命名。 |
 | 同名的 worktree 目录已存在。 | `.worktrees/<分支>` 位置有残留目录挡着，用 `git worktree prune` 或手动清掉。 |
 | 当前工作区有未提交改动。 | 你在工作区不干净时关掉了 worktree 开关。重新打开开关，或先提交/stash。 |
 | Git 拒绝了这个操作。 | 其它 Git 失败，具体 Git 报错会显示在对话框里。 |
@@ -149,6 +167,7 @@ git branch -d feature/login
 ┌──────────────────────── Host（index.js）───────────────────────────┐
 │  connection.requestRejection()  ← 信任栅栏，先于一切                │
 │  /branch-worktree/inspect  → 仓库、分支、现有 worktree、脏状态       │
+│  /branch-worktree/suggest  → 自动模式下将被创建的 branch 与路径      │
 │  /branch-worktree/create   → git worktree add | git checkout        │
 │                            → workspaceRegistry.create(path)         │
 └─────────────────────────────────────────────────────────────────────┘
@@ -166,7 +185,7 @@ git branch -d feature/login
 
 | 半区 | 位置 |
 |---|---|
-| Host | `webServer` exact 路由 `/branch-worktree/inspect`、`/branch-worktree/create` |
+| Host | `webServer` exact 路由 `/branch-worktree/inspect`、`/branch-worktree/suggest`、`/branch-worktree/create` |
 | Client | `conversation.hero.options`（list 槽），id `branch-worktree`，order `-10` |
 
 关于「插到项目和模式中间」：DSH 在新会话行里**没有**提供这两个 chip 之间的插槽——`conversation.hero.workspace` 和 `conversation.hero.agentPreset` 都是 `display: contents` 的包装层，而唯一给额外控件用的 `conversation.hero.options` 是整行右对齐的。插件因此注入一小段受限 CSS：把该容器设为 `display: contents`，用 `order` 把本插件排在两个内置 chip 之间。选择器用 `:has()` 限定在**仅新会话行**，不影响会话视图，也没有挪动其它插件的节点；如果将来 DSH 在该位置提供了正式插槽，这段 CSS 会自动失去意义。

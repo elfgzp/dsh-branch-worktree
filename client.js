@@ -24,6 +24,10 @@ window.__ModuleLoader__.load({
         chip: 'Branch',
         badgeWorktree: 'worktree',
         branchLabel: 'Branch',
+        autoBranchLabel: 'Auto name',
+        autoBranchHint: 'Leave it to the plugin: a fresh branch and worktree name are generated for you.',
+        autoPreviewLabel: 'Will create',
+        autoOffHint: 'Name the branch yourself below.',
         newBranchLabel: 'New branch',
         newBranchPlaceholder: 'or type a new branch name',
         baseLabel: 'based on',
@@ -37,9 +41,11 @@ window.__ModuleLoader__.load({
         usedTag: 'in use',
         newBranchHint: 'A new branch is created from the chosen base.',
         reuseHint: 'This branch exists, so it is checked out into the worktree as-is.',
+        unnamedTag: 'auto',
         errorNotRepo: 'This workspace is not inside a Git repository.',
         errorInvalidBranch: 'Branch names accept letters, digits and . _ / - only.',
         errorCheckedOut: 'That branch is already checked out in another worktree.',
+        errorMainCheckout: 'That branch is checked out in your main working copy, so it cannot be isolated into a worktree. Pick or type another branch.',
         errorPathExists: 'A worktree directory with that name already exists.',
         errorDirty: 'Your current checkout has uncommitted changes; keep the worktree option on, or commit them first.',
         errorGit: 'Git refused the operation.',
@@ -49,6 +55,10 @@ window.__ModuleLoader__.load({
         chip: '分支',
         badgeWorktree: 'worktree',
         branchLabel: '分支',
+        autoBranchLabel: '自动命名',
+        autoBranchHint: '交给插件生成分支名和 worktree 名，不用自己想。',
+        autoPreviewLabel: '将创建',
+        autoOffHint: '在下面自己填分支名。',
         newBranchLabel: '新建分支',
         newBranchPlaceholder: '或输入新分支名',
         baseLabel: '基于',
@@ -62,9 +72,11 @@ window.__ModuleLoader__.load({
         usedTag: '已占用',
         newBranchHint: '将基于所选分支新建一个分支。',
         reuseHint: '该分支已存在，直接检出到 worktree，不新建分支。',
+        unnamedTag: '自动',
         errorNotRepo: '这个工作区不在 Git 仓库内。',
         errorInvalidBranch: '分支名只能包含字母、数字和 . _ / -。',
         errorCheckedOut: '该分支已经在另一个 worktree 中检出。',
+        errorMainCheckout: '该分支就在主工作区里检出，无法再隔离到 worktree。请换一个分支或新建分支。',
         errorPathExists: '同名的 worktree 目录已存在。',
         errorDirty: '当前工作区有未提交改动；请保留 worktree 开关，或先提交改动。',
         errorGit: 'Git 拒绝了这个操作。',
@@ -78,6 +90,7 @@ window.__ModuleLoader__.load({
       'not-a-directory': 'errorNotRepo',
       'invalid-branch': 'errorInvalidBranch',
       'branch-checked-out': 'errorCheckedOut',
+      'branch-is-main-checkout': 'errorMainCheckout',
       'path-exists': 'errorPathExists',
       'worktree-dirty': 'errorDirty',
       'git-failed': 'errorGit',
@@ -181,6 +194,38 @@ window.__ModuleLoader__.load({
       },
       footer: { display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-end' },
       toggleRow: { display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 },
+      /** The generated name, shown before it is created so auto mode is not a black box. */
+      preview: {
+        display: 'grid',
+        gap: 2,
+        marginTop: 2,
+        padding: '6px 8px',
+        borderRadius: 7,
+        background: 'var(--dsw-alias-bg-layer-2)',
+        minWidth: 0,
+      },
+      previewLabel: {
+        fontSize: 11,
+        lineHeight: '15px',
+        color: 'var(--dsw-alias-label-secondary)',
+      },
+      previewValue: {
+        fontFamily: 'var(--dsw-alias-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
+        fontSize: 12,
+        lineHeight: '17px',
+        color: 'var(--dsw-alias-label-primary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
+      previewPath: {
+        fontSize: 10,
+        lineHeight: '14px',
+        color: 'var(--dsw-alias-label-secondary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
     }
 
     /**
@@ -253,14 +298,26 @@ window.__ModuleLoader__.load({
     }
 
     /** Create or reuse the checkout for one branch. */
-    async function prepare(cwd, branch, worktree, base) {
+    async function prepare(cwd, branch, worktree, base, seed) {
       const response = await fetch(new URL(`${PREFIX}/create`, hostBase()), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd, branch, worktree, base }),
+        body: JSON.stringify({ cwd, branch, worktree, base, seed }),
       })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'create-failed', '')
+      if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
+      return payload
+    }
+
+    /** Ask the Host which branch name the automatic mode would generate now. */
+    async function suggest(cwd, seed) {
+      const url = new URL(`${PREFIX}/suggest`, hostBase())
+      url.searchParams.set('cwd', cwd)
+      if (seed !== '') url.searchParams.set('seed', seed)
+      const response = await fetch(url, { headers: { accept: 'application/json' } })
+      const payload = await response.json().catch(() => undefined)
+      if (payload === undefined) throw httpError(response.status, 'suggest-failed', '')
       if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
       return payload
     }
@@ -298,6 +355,12 @@ window.__ModuleLoader__.load({
         const [newBranch, setNewBranch] = React.useState('')
         const [base, setBase] = React.useState('')
         const [worktree, setWorktree] = React.useState(true)
+        // Automatic naming is the default: the worktree switch is on out of the
+        // box, and a worktree needs a name the user has not chosen yet. Making
+        // them invent one before the feature works is the friction this mode
+        // removes; the name is still previewed and still overridable.
+        const [autoName, setAutoName] = React.useState(true)
+        const [preview, setPreview] = React.useState(null)
         const [creating, setCreating] = React.useState(false)
         const [failure, setFailure] = React.useState(null)
 
@@ -337,21 +400,59 @@ window.__ModuleLoader__.load({
         }, [cwd])
 
         const repo = status.phase === 'ready' ? status.repo : undefined
-        const shown = repo === undefined ? undefined : (branch !== '' ? branch : repo.currentBranch)
-        const chipTitle = shown === undefined ? t('chip') : `${t('chip')}: ${shown}`
         const typed = newBranch.trim()
-        const target = typed !== '' ? typed : branch
-        const targetExists = repo !== undefined && repo.branches.some((item) => item.name === target)
+
+        /**
+         * Refresh the name the automatic mode would generate.
+         *
+         * Runs whenever the repository, the switch, or the draft changes: the
+         * draft is the seed, so typing a prompt makes the generated name
+         * meaningful ("fix the login crash" → `wt/fix-the-login-crash`). The
+         * debounce keeps a fast typist from issuing one request per keystroke;
+         * the trailing call always wins because each run clears the previous.
+         */
+        React.useEffect(() => {
+          if (repo === undefined || !autoName) {
+            setPreview(null)
+            return undefined
+          }
+          let alive = true
+          const seed = typeof draft === 'string' ? draft : ''
+          const timer = setTimeout(() => {
+            suggest(repo.cwd, seed).then((payload) => {
+              if (alive) setPreview(payload)
+            }, () => {
+              if (alive) setPreview(null)
+            })
+          }, 300)
+          return () => { alive = false; clearTimeout(timer) }
+        }, [repo, autoName, draft])
+
+        /** The branch this submission would use, or '' when none is chosen yet. */
+        const target = autoName
+          ? (preview === null ? '' : preview.branch)
+          : (typed !== '' ? typed : branch)
+        const shown = autoName
+          ? (preview === null ? undefined : preview.branch)
+          : (repo === undefined ? undefined : (branch !== '' ? branch : repo.currentBranch))
+        const chipTitle = shown === undefined ? t('chip') : `${t('chip')}: ${shown}`
+        const targetExists = repo !== undefined && !autoName && repo.branches.some((item) => item.name === target)
 
         const submit = async () => {
-          if (repo === undefined || creating || target === '') return
+          if (repo === undefined || creating || (target === '' && !autoName)) return
           setCreating(true)
           setFailure(null)
           try {
-            const result = await prepare(cwd, target, worktree, base === '' ? repo.baseBranch : base)
+            const prompt = typeof draft === 'string' ? draft : ''
+            const result = await prepare(
+              cwd,
+              autoName ? '' : target,
+              worktree,
+              base === '' ? repo.baseBranch : base,
+              autoName ? prompt : '',
+            )
             const uiWorkspace = services.uiWorkspace()
             if (uiWorkspace === undefined) throw httpError(0, 'create-failed', 'workspace service unavailable')
-            const prompt = typeof draft === 'string' ? draft : ''
             const options = prompt === '' ? undefined : { prompt, clearPreviousDraft: true }
             setOpen(false)
             if (result.workspaceId !== undefined && result.workspaceId !== currentWorkspaceId) {
@@ -371,7 +472,26 @@ window.__ModuleLoader__.load({
         const failureText = failure === null ? null : t(ERROR_KEY[failure] ?? 'errorUnknown')
 
         const panel = [
-          h('div', { key: 'branch', style: S.field }, [
+          h('div', { key: 'auto' }, [
+            h('div', { key: 'row', style: S.toggleRow }, h(Switch, {
+              checked: autoName,
+              disabled: creating || repo === undefined,
+              label: t('autoBranchLabel'),
+              onChange: (value) => {
+                setAutoName(value)
+                // Falling back to manual naming keeps a real branch selected,
+                // so the switch never leaves the form in an unusable state.
+                if (!value && branch === '' && repo !== undefined) setBranch(repo.currentBranch)
+              },
+            })),
+            h('p', { key: 'hint', style: S.hint }, autoName ? t('autoBranchHint') : t('autoOffHint')),
+            autoName && preview !== null ? h('div', { key: 'preview', style: S.preview }, [
+              h('span', { key: 'label', style: S.previewLabel }, t('autoPreviewLabel')),
+              h('code', { key: 'branch', style: S.previewValue }, preview.branch),
+              h('span', { key: 'path', style: S.previewPath }, preview.worktreePath),
+            ]) : null,
+          ]),
+          autoName ? null : h('div', { key: 'branch', style: S.field }, [
             h('label', { key: 'label', style: S.fieldLabel, htmlFor: 'bw-branch' }, t('branchLabel')),
             h('select', {
               key: 'select',
@@ -391,7 +511,7 @@ window.__ModuleLoader__.load({
                 disabled: item.current !== true && item.checkedOutAt !== null && item.checkedOutAt !== undefined,
               }, branchText(item, t)))),
           ]),
-          h('div', { key: 'new', style: S.field }, [
+          autoName ? null : h('div', { key: 'new', style: S.field }, [
             h('label', { key: 'label', style: S.fieldLabel, htmlFor: 'bw-new' }, t('newBranchLabel')),
             h('input', {
               key: 'input',
@@ -409,7 +529,7 @@ window.__ModuleLoader__.load({
               },
             }),
           ]),
-          typed !== '' && repo !== undefined ? h('div', { key: 'base', style: S.field }, [
+          (autoName || typed !== '') && repo !== undefined ? h('div', { key: 'base', style: S.field }, [
             h('label', { key: 'label', style: S.fieldLabel, htmlFor: 'bw-base' }, t('baseLabel')),
             h('select', {
               key: 'select',
@@ -420,7 +540,7 @@ window.__ModuleLoader__.load({
               onChange: (event) => { setBase(event.target.value) },
             }, repo.branches.map((item) => h('option', { key: item.name, value: item.name }, item.name))),
           ]) : null,
-          repo === undefined ? null : h('p', { key: 'state', style: S.hint },
+          repo === undefined || autoName ? null : h('p', { key: 'state', style: S.hint },
             typed !== '' ? t('newBranchHint') : targetExists ? t('reuseHint') : ''),
           h('div', { key: 'divider', style: S.divider }),
           h('div', { key: 'worktree' }, [
@@ -428,7 +548,12 @@ window.__ModuleLoader__.load({
               checked: worktree,
               disabled: creating,
               label: t('worktreeOn'),
-              onChange: setWorktree,
+              onChange: (value) => {
+                setWorktree(value)
+                // In-place mode swaps the checkout onto an existing branch, so
+                // it has nothing to auto-name; drop back to manual selection.
+                if (!value) setAutoName(false)
+              },
             })),
             h('p', { key: 'hint', style: S.hint }, worktree ? t('worktreeHint') : t('inPlaceHint')),
           ]),
@@ -437,7 +562,7 @@ window.__ModuleLoader__.load({
             h(Button, {
               key: 'start',
               variant: 'primary',
-              disabled: creating || repo === undefined || target === '',
+              disabled: creating || repo === undefined || (target === '' && !autoName),
               onClick: () => { void submit() },
             }, creating ? t('creating') : t('start')),
           ]),

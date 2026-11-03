@@ -35,6 +35,13 @@ const WORKTREE_DIRNAME = '.worktrees'
 /** Branch names this plugin accepts: a conservative single ref segment path. */
 const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]{1,120}$/
 
+/**
+ * Namespace for auto-generated branch names. Keeping generated work in its own
+ * ref namespace makes it obvious in the picker which branches a user chose and
+ * which the plugin invented.
+ */
+const AUTO_BRANCH_PREFIX = 'wt/'
+
 /** Environment stripped from every Git child: repository selectors only. */
 const GIT_ENV_OVERRIDES = {
   GIT_DIR: undefined,
@@ -95,6 +102,27 @@ async function isDirectory(path) {
   }
 }
 
+/**
+ * Compare two paths after resolving symlinks.
+ *
+ * `git worktree list` reports resolved paths while the caller's directory may
+ * arrive through a symlinked parent (macOS `/var` vs `/private/var`), so a
+ * plain string comparison would miss that they name one directory.
+ *
+ * @param {string} left - first path.
+ * @param {string} right - second path.
+ * @returns {Promise<boolean>} whether both name the same directory.
+ */
+async function isSamePath(left, right) {
+  const { realpath } = await import('node:fs/promises')
+  try {
+    const [a, b] = await Promise.all([realpath(left), realpath(right)])
+    return a === b
+  } catch {
+    return left === right
+  }
+}
+
 /** Validate one requested branch name. */
 function validateBranch(branch) {
   if (typeof branch !== 'string' || !BRANCH_PATTERN.test(branch)) {
@@ -109,6 +137,60 @@ function validateBranch(branch) {
 /** Convert a branch name into the worktree's directory name. */
 function worktreeDirName(branch) {
   return branch.replaceAll('/', '-')
+}
+
+/**
+ * Format one instant as a compact, branch-safe stamp in local time.
+ * @param {Date} date - the instant to stamp.
+ * @returns {string} `YYYYMMDD-HHmmss`, which is legal inside a Git ref segment.
+ */
+function nameStamp(date) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+    + `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+}
+
+/**
+ * Turn an unsent draft prompt into a readable ref segment.
+ *
+ * Only ASCII letters and digits survive: a prompt in any other script (or one
+ * that is mostly punctuation) yields no seed, and the caller falls back to a
+ * timestamp. That keeps generated refs portable across Git hosting providers.
+ *
+ * @param {unknown} seed - the draft prompt, when the client had one.
+ * @returns {string} a lowercase `-`-joined slug, possibly empty.
+ */
+function nameSlug(seed) {
+  if (typeof seed !== 'string') return ''
+  const slug = seed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').replace(/-+$/, '')
+  if (slug === '') return ''
+  const clipped = slug.length > 32 ? slug.slice(0, 32).replace(/-+$/, '') : slug
+  return clipped
+}
+
+/**
+ * Pick an unused branch name for the automatic mode.
+ *
+ * Generated work lives under {@link AUTO_BRANCH_PREFIX}, so a glance at the
+ * picker separates names a person chose from names this plugin invented. Both
+ * the branch and its future worktree directory are checked, because either one
+ * existing would make `git worktree add` fail.
+ *
+ * @param {object} status - repository status from {@link inspectRepository}.
+ * @param {unknown} seed - optional draft prompt used as a readable stem.
+ * @param {Date} now - clock injection point for tests.
+ * @returns {Promise<string>} a free branch name.
+ */
+async function generateBranchName(status, seed, now = new Date()) {
+  const slug = nameSlug(seed)
+  const stem = slug === '' ? nameStamp(now) : slug
+  for (let index = 1; index <= 50; index += 1) {
+    const candidate = index === 1 ? `${AUTO_BRANCH_PREFIX}${stem}` : `${AUTO_BRANCH_PREFIX}${stem}-${index}`
+    if (status.branches.some((entry) => entry.name === candidate)) continue
+    if (await isDirectory(join(status.worktreeRoot, worktreeDirName(candidate)))) continue
+    return candidate
+  }
+  throw new BranchWorktreeError('name-exhausted', `could not find a free automatic branch name under ${AUTO_BRANCH_PREFIX}`)
 }
 
 /** One structured, client-displayable failure. */
@@ -230,6 +312,17 @@ async function excludeWorktreePool(gitDir, entry) {
 async function ensureWorktree(status, branch, baseBranch) {
   const existing = status.worktrees.find((entry) => entry.branch === branch)
   if (existing !== undefined) {
+    // The repository's own checkout is listed among the worktrees, so matching
+    // on branch alone would answer "reuse the main checkout" for the branch
+    // that is already checked out there — silently handing back the directory
+    // the user asked to be isolated from, with the worktree switch still on.
+    // Only a real secondary checkout counts as a worktree.
+    if (await isSamePath(existing.path, status.repositoryRoot)) {
+      throw new BranchWorktreeError(
+        'branch-is-main-checkout',
+        `branch "${branch}" is checked out in the main working copy; pick or type another branch to get an isolated worktree`,
+      )
+    }
     return { path: existing.path, branch, created: false, reusedWorktree: true }
   }
 
@@ -359,6 +452,43 @@ export function apply(ctx) {
     },
   }), 'branch-worktree: inspect route')
 
+  // Preview route for the automatic mode: the panel shows the exact name it
+  // would create before the user commits, so "auto" is never a black box.
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: `${PREFIX}/suggest`,
+    async handler(req, res) {
+      if (rejected(req, res)) return
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { code: 'bad-request', message: 'GET required' })
+        return
+      }
+      const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+      const cwd = url.searchParams.get('cwd') ?? ''
+      const seed = url.searchParams.get('seed') ?? ''
+      try {
+        const status = await inspectRepository(cwd)
+        if (status.isRepo !== true) {
+          throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
+        }
+        const branch = await generateBranchName(status, seed)
+        sendJson(res, 200, {
+          ok: true,
+          branch,
+          worktreePath: join(status.worktreeRoot, worktreeDirName(branch)),
+          baseBranch: status.currentBranch,
+        })
+      } catch (error) {
+        const known = error instanceof BranchWorktreeError
+        sendJson(res, known ? 400 : 500, {
+          ok: false,
+          code: known ? error.code : 'suggest-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+  }), 'branch-worktree: suggest route')
+
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: `${PREFIX}/create`,
@@ -386,12 +516,18 @@ export function apply(ctx) {
       }
       try {
         const cwd = body.cwd
-        const branch = validateBranch(body.branch)
         const useWorktree = body.worktree !== false
         const status = await inspectRepository(cwd)
         if (status.isRepo !== true) {
           throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
         }
+        // An empty name means "let the plugin decide". The client normally sends
+        // the name it already displayed, so what was previewed is what is
+        // created; this branch only answers a caller that asked for none.
+        const requested = typeof body.branch === 'string' ? body.branch.trim() : ''
+        const branch = requested === ''
+          ? validateBranch(await generateBranchName(status, body.seed))
+          : validateBranch(requested)
         const baseBranch = validateBranch(typeof body.base === 'string' && body.base !== '' ? body.base : status.baseBranch)
         const checkout = useWorktree
           ? await ensureWorktree(status, branch, baseBranch)

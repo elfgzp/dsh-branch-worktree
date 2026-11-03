@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Branch & Worktree",
-    "description": "Pick a Git branch on the New Session screen and start the conversation inside an automatically created worktree."
+    "description": "Pick a Git branch, or let the plugin name one, and start the conversation inside an automatically created worktree."
   }
 }
