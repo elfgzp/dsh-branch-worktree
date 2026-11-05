@@ -737,6 +737,26 @@ window.__ModuleLoader__.load({
         // outside React, and the cost is one JSON parse.
         const sessionId = currentSessionId()
         const cwd = sessionId === undefined ? undefined : sessions.byId?.[sessionId]?.cwd
+
+        // Whether the directory is even a Git repository is a Host fact, not
+        // something the path reveals. Asking first is what keeps the bar from
+        // offering "New worktree" in a plain folder, where the click could only
+        // ever fail.
+        const [repoState, setRepoState] = React.useState('unknown')
+        React.useEffect(() => {
+          if (cwd === undefined || cwd === '') {
+            setRepoState('none')
+            return undefined
+          }
+          let alive = true
+          setRepoState('unknown')
+          inspect(cwd).then(() => {
+            if (alive) setRepoState('repo')
+          }, () => {
+            if (alive) setRepoState('none')
+          })
+          return () => { alive = false }
+        }, [cwd])
         const workspaceId = React.useMemo(() => {
           if (sessionId === undefined || workspaces.phase !== 'ready') return undefined
           for (const item of workspaces.items) {
@@ -746,8 +766,9 @@ window.__ModuleLoader__.load({
         }, [sessionId, workspaces])
 
         // Only offer the switch when there is a real conversation sitting in a
-        // non-worktree checkout; everywhere else the bar stays out of the way.
-        if (cwd === undefined || cwd === '' || isWorktreePath(cwd)) return null
+        // Git repository that is not already a worktree; everywhere else the
+        // bar stays out of the way entirely.
+        if (cwd === undefined || cwd === '' || repoState !== 'repo' || isWorktreePath(cwd)) return null
 
         const switchToWorktree = async () => {
           if (busy) return
@@ -778,7 +799,7 @@ window.__ModuleLoader__.load({
             : `${t('statusDone')} ${done}`
         const failureText = failure === null ? null : t(ERROR_KEY[failure] ?? 'errorUnknown')
 
-        return h('div', { style: S.statusBar }, [
+        return h('div', { style: S.statusBar, 'data-bw-status': 'ready' }, [
           h('div', { key: 'left', style: S.statusLeft }, [
             h('span', { key: 'cwd', style: S.statusPath, title: cwd }, shortPath(cwd)),
           ]),

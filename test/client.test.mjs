@@ -23,6 +23,16 @@ const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT = `${REPO}/client.js`
 const HOST = `${REPO}/index.js`
 
+// Count `/inspect` round-trips so a "should render nothing" assertion can wait
+// for the decision to actually have been made, instead of passing instantly.
+const inspectCalls = { count: 0 }
+const realFetch = globalThis.fetch
+globalThis.fetch = (input, init) => {
+  const url = typeof input === 'string' ? input : String(input?.url ?? input)
+  if (url.includes('/branch-worktree/inspect')) inspectCalls.count += 1
+  return realFetch(input, init)
+}
+
 const dom = new JSDOM('<!doctype html><html><head></head><body><div id="root"></div></body></html>', { url: 'http://127.0.0.1:50549/' })
 globalThis.window = dom.window
 globalThis.document = dom.window.document
@@ -144,9 +154,19 @@ async function waitFor(predicate, timeoutMs = 15_000) {
 }
 
 // --- harness for one slot at a time ---
+let liveRoot = null
+
 async function mount(slotName, state) {
   const C = registered[slotName]
   if (C === undefined) throw new Error(`slot ${slotName} was not registered`)
+  // Tear down the previous occupant first: an un-unmounted one keeps its
+  // `inspect` effect alive and its container in the document, which made the
+  // "quiet" detection below see another component's renders as its own.
+  if (liveRoot !== null) {
+    const previous = liveRoot
+    liveRoot = null
+    await React.act(async () => { previous.unmount() })
+  }
   const useSessions = (sel) => sel({ byId: state.sessions, ids: Object.keys(state.sessions), phase: 'ready' })
   const useWorkspaces = (sel) => sel({ phase: 'ready', items: state.workspaces, archivedSessionIds: [], pinnedSessionIds: [] })
   const useInput = (sel) => sel({ draft: state.draft ?? '' })
@@ -157,10 +177,17 @@ async function mount(slotName, state) {
   const el = document.createElement('div')
   document.body.appendChild(el)
   const root = createRoot(el)
+  liveRoot = root
   await React.act(async () => {
     root.render(React.createElement(C, { t, sessionId: state.sessionId, useSessions, useWorkspaces, useInput }))
   })
-  await settle()
+  // `inspect` is a network round-trip, so the first paint is the neutral
+  // 'unknown' state and renders nothing. The caller passes a predicate for
+  // whatever the occupant is expected to do (render a bar, or stay empty), and
+  // this waits for THAT rather than for a fixed delay — the previous version
+  // guessed at timing and was intermittently wrong.
+  await waitFor(() => state.until === undefined || state.until(el), 20_000)
+  await settle(120)
   return { el, root }
 }
 
@@ -168,23 +195,23 @@ console.log('\n[1] hero chip — Git repo, non-Git dir, back to Git repo')
 localStorage.clear()
 {
   const s1 = { sessionId: 's1', sessions: { s1: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w1', path: repoDir, sessionIds: ['s1'] }], draft: 'fix the login crash' }
-  const a = await mount('conversation.hero.options', s1)
+  const a = await mount('conversation.hero.options', { ...s1, until: (el) => el.innerHTML.includes('aria-haspopup') })
   check('chip visible in a repo', a.el.querySelector('button[aria-haspopup="menu"]') !== null)
-  await React.act(async () => { a.root.unmount() })
 }
 {
   localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's2' }))
   const s2 = { sessionId: 's2', sessions: { s2: { cwd: plainDir } }, workspaces: [{ workspaceId: 'w2', path: plainDir, sessionIds: ['s2'] }] }
-  const b = await mount('conversation.hero.options', s2)
+  // The chip is *correctly* absent here, so nothing ever renders: wait until the
+  // inspect round-trip behind it has actually completed.
+  const before = inspectCalls.count
+  const b = await mount('conversation.hero.options', { ...s2, until: (el) => inspectCalls.count > before && el.innerHTML.trim() === '' })
   check('no crash on a non-repo payload', !errors.some((e) => e.includes('Cannot read properties of undefined')), errors.slice(-2).join(' | '))
   check('chip hidden outside a repo', b.el.querySelector('button[aria-haspopup="menu"]') === null)
-  await React.act(async () => { b.root.unmount() })
 }
 {
   const s3 = { sessionId: 's3', sessions: { s3: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w1', path: repoDir, sessionIds: ['s3'] }] }
-  const c = await mount('conversation.hero.options', s3)
+  const c = await mount('conversation.hero.options', { ...s3, until: (el) => el.innerHTML.includes('aria-haspopup') })
   check('chip comes BACK when switching back to a repo', c.el.querySelector('button[aria-haspopup="menu"]') !== null)
-  await React.act(async () => { c.root.unmount() })
 }
 
 console.log('\n[2] status bar — hidden when already in a worktree, shown on the main checkout')
@@ -192,28 +219,40 @@ console.log('\n[2] status bar — hidden when already in a worktree, shown on th
   localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's4' }))
   const wtPath = join(repoDir, '.worktrees', 'wt-some-branch')
   const s4 = { sessions: { s4: { cwd: wtPath } }, workspaces: [{ workspaceId: 'w4', path: wtPath, sessionIds: ['s4'] }] }
-  const d = await mount('shell.bottom', s4)
+  const beforeD = inspectCalls.count
+  const d = await mount('shell.bottom', { ...s4, until: (el) => inspectCalls.count > beforeD && el.innerHTML.trim() === '' })
   check('hidden inside .worktrees/', d.el.textContent.trim() === '', d.el.textContent)
-  await React.act(async () => { d.root.unmount() })
 }
 {
   localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's5' }))
   const s5 = { sessions: { s5: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w5', path: repoDir, sessionIds: ['s5'] }] }
-  const e = await mount('shell.bottom', s5)
+  const e = await mount('shell.bottom', { ...s5, until: (el) => el.innerHTML.includes('data-bw-status') })
   const btn = [...e.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
   check('shown on the main checkout', btn !== undefined, e.el.textContent)
   // The bar shortens long paths to `…/last/three/segments` so the tail (which
   // identifies the checkout) stays visible; assert on the tail, not the prefix.
   const tail = repoDir.split('/').slice(-3).join('/')
   check('path is displayed (tail readable)', e.el.textContent.includes(tail), e.el.textContent)
-  await React.act(async () => { e.root.unmount() })
+}
+
+console.log('\n[2b] status bar — absent in a directory that is not a Git repository')
+{
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's5b' }))
+  const s5b = { sessions: { s5b: { cwd: plainDir } }, workspaces: [{ workspaceId: 'w5b', path: plainDir, sessionIds: ['s5b'] }] }
+  const beforeG = inspectCalls.count
+  const g = await mount('shell.bottom', { ...s5b, until: (el) => inspectCalls.count > beforeG && el.innerHTML.trim() === '' })
+  // The Host answers `isRepo: false` for a plain folder. Offering "New worktree"
+  // there would only produce a button that cannot ever succeed, so the whole
+  // bar hides — this regressed once, when the path alone was the only check.
+  check('bar hidden outside a Git repository', g.el.textContent.trim() === '', g.el.textContent)
+  check('no crash on the non-repo payload', !errors.some((e) => e.includes('Cannot read properties of undefined')), errors.slice(-2).join(' | '))
 }
 
 console.log('\n[3] status bar — clicking creates a worktree, switches Workspace, prompts migration')
 {
   localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's6' }))
   const s6 = { sessions: { s6: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w6', path: repoDir, sessionIds: ['s6'] }] }
-  const f = await mount('shell.bottom', s6)
+  const f = await mount('shell.bottom', { ...s6, until: (el) => el.innerHTML.includes('data-bw-status') })
   let btn = [...f.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
   // The stub Button forwards onClick directly (real primitives do too), so read
   // it off the element React attached rather than synthesising a DOM event.
@@ -233,7 +272,6 @@ console.log('\n[3] status bar — clicking creates a worktree, switches Workspac
   const prompt = String(options?.prompt ?? '')
   check('migration prompt carries the new path', prompt.includes('.worktrees/wt-'), prompt)
   check('migration prompt mentions teammates/subagents', /teammate|subagent|团队成员|子智能体/i.test(prompt), prompt)
-  await React.act(async () => { f.root.unmount() })
 }
 
 server.close()
