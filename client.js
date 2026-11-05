@@ -50,6 +50,14 @@ window.__ModuleLoader__.load({
         errorDirty: 'Your current checkout has uncommitted changes; keep the worktree option on, or commit them first.',
         errorGit: 'Git refused the operation.',
         errorUnknown: 'The checkout could not be prepared.',
+        statusSwitch: 'New worktree',
+        statusBusy: 'Creating worktree…',
+        statusDone: 'Created',
+        migratePrompt: 'I switched this session to a new Git worktree at {path}. '
+          + 'Move any in-progress work (files not yet committed) into that directory first, '
+          + 'and tell the user if anything could not be moved. '
+          + 'Also note the new path for any teammate or subagent you delegate to: '
+          + 'they must be pointed at {path}, because the previous working directory is now a different checkout.',
       },
       zh: {
         chip: '分支',
@@ -81,6 +89,14 @@ window.__ModuleLoader__.load({
         errorDirty: '当前工作区有未提交改动；请保留 worktree 开关，或先提交改动。',
         errorGit: 'Git 拒绝了这个操作。',
         errorUnknown: '无法准备检出目录。',
+        statusSwitch: '新建 worktree',
+        statusBusy: '正在创建 worktree…',
+        statusDone: '已创建',
+        migratePrompt: '我已经把当前会话切换到一个新的 Git worktree：{path}。'
+          + '请先把还没提交的改动（工作区里未提交的文件）搬到这个新目录，'
+          + '如果有的文件搬不过去，告诉用户。'
+          + '另外，之后交给团队成员或子智能体的任务，都要把工作目录指向 {path}，'
+          + '因为原来的目录已经是另一个检出了。',
       },
     }
 
@@ -226,6 +242,31 @@ window.__ModuleLoader__.load({
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
       },
+      /** The thin full-width bar at the very bottom of the window. */
+      statusBar: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        minHeight: 26,
+        padding: '0 10px 0 14px',
+        borderTop: '0.5px solid var(--dsw-alias-border-l1)',
+        background: 'var(--dsw-alias-bg-layer-1)',
+        fontSize: 11,
+        lineHeight: '16px',
+        color: 'var(--dsw-alias-label-secondary)',
+      },
+      statusLeft: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: '1 1 auto' },
+      statusRight: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
+      statusPath: {
+        fontFamily: 'var(--dsw-alias-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
+        fontSize: 11,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+        direction: 'rtl',
+        textAlign: 'left',
+      },
     }
 
     /**
@@ -304,11 +345,11 @@ window.__ModuleLoader__.load({
     }
 
     /** Create or reuse the checkout for one branch. */
-    async function prepare(cwd, branch, worktree, base, seed) {
+    async function prepare(cwd, branch, worktree, base) {
       const response = await fetch(new URL(`${PREFIX}/create`, hostBase()), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd, branch, worktree, base, seed }),
+        body: JSON.stringify({ cwd, branch, worktree, base }),
       })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'create-failed', '')
@@ -316,11 +357,16 @@ window.__ModuleLoader__.load({
       return payload
     }
 
-    /** Ask the Host which branch name the automatic mode would generate now. */
-    async function suggest(cwd, seed) {
+    /**
+     * Ask the Host which branch name the automatic mode would generate now.
+     *
+     * The name is random on the Host side and deliberately independent of the
+     * conversation, so this endpoint takes no seed. It exists purely so the
+     * panel can show the name before anything is created.
+     */
+    async function suggest(cwd) {
       const url = new URL(`${PREFIX}/suggest`, hostBase())
       url.searchParams.set('cwd', cwd)
-      if (seed !== '') url.searchParams.set('seed', seed)
       const response = await fetch(url, { headers: { accept: 'application/json' } })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'suggest-failed', '')
@@ -414,11 +460,12 @@ window.__ModuleLoader__.load({
         /**
          * Refresh the name the automatic mode would generate.
          *
-         * Runs whenever the repository, the switch, or the draft changes: the
-         * draft is the seed, so typing a prompt makes the generated name
-         * meaningful ("fix the login crash" → `wt/fix-the-login-crash`). The
-         * debounce keeps a fast typist from issuing one request per keystroke;
-         * the trailing call always wins because each run clears the previous.
+         * The name is random and unrelated to the conversation, so this only
+         * re-runs when the repository changes (or the switch is turned back
+         * on). It is NOT keyed on the draft: a worktree name is a durable Git
+         * ref, and binding it to whatever happened to be typed in the box would
+         * leak prompt text into branch names and make two unrelated branches
+         * collide on the same sentence.
          */
         React.useEffect(() => {
           if (repo === undefined || !autoName) {
@@ -426,16 +473,13 @@ window.__ModuleLoader__.load({
             return undefined
           }
           let alive = true
-          const seed = typeof draft === 'string' ? draft : ''
-          const timer = setTimeout(() => {
-            suggest(repo.cwd, seed).then((payload) => {
-              if (alive) setPreview(payload)
-            }, () => {
-              if (alive) setPreview(null)
-            })
-          }, 300)
-          return () => { alive = false; clearTimeout(timer) }
-        }, [repo, autoName, draft])
+          suggest(repo.cwd).then((payload) => {
+            if (alive) setPreview(payload)
+          }, () => {
+            if (alive) setPreview(null)
+          })
+          return () => { alive = false }
+        }, [repo, autoName])
 
         /** The branch this submission would use, or '' when none is chosen yet. */
         const target = autoName
@@ -458,7 +502,6 @@ window.__ModuleLoader__.load({
               autoName ? '' : target,
               worktree,
               base === '' ? repo.baseBranch : base,
-              autoName ? prompt : '',
             )
             const uiWorkspace = services.uiWorkspace()
             if (uiWorkspace === undefined) throw httpError(0, 'create-failed', 'workspace service unavailable')
@@ -618,11 +661,125 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Read the Session the main panel is currently showing.
+     *
+     * `shell.bottom` is root-scoped, so its occupant gets no `sessionId` prop
+     * (only session-scoped slots are handed one). The workspace domain persists
+     * the current main-panel selection under this localStorage key, which is
+     * the only root-scope way to name that Session.
+     *
+     * @returns {string | undefined} the current Session id, when known.
+     */
+    function currentSessionId() {
+      try {
+        const raw = globalThis.localStorage?.getItem('dsh.sessions.current')
+        if (typeof raw !== 'string' || raw === '') return undefined
+        const parsed = JSON.parse(raw)
+        return typeof parsed?.sessionId === 'string' && parsed.sessionId !== '' ? parsed.sessionId : undefined
+      } catch {
+        return undefined
+      }
+    }
+
+    /** Whether a path is a checkout this plugin created under `.worktrees/`. */
+    function isWorktreePath(path) {
+      return typeof path === 'string' && /[\\/]\.worktrees[\\/]/.test(path)
+    }
+
+    /**
+     * Build the bottom status-bar control.
+     *
+     * It answers one question the New Session chip cannot: "I am working in the
+     * main checkout right now — give me an isolated worktree without losing
+     * this conversation." The panel creates the checkout on the Host, then
+     * re-opens the Workspace, which hands the main panel to a Session bound to
+     * the new path (a Session's directory is fixed at creation, so switching in
+     * place is not a thing the Client can do), and finally sends a prompt
+     * telling the model that its files, its teammates and its subagents are now
+     * at a different path.
+     *
+     * @param services - late-bound client services resolved per interaction.
+     * @returns the `shell.bottom` occupant component.
+     */
+    function createStatusBar(services) {
+      return function BranchWorktreeStatusBar(props) {
+        const { t, useSessions, useWorkspaces } = props
+        const workspaces = useWorkspaces((state) => state)
+        const sessions = useSessions((state) => state)
+
+        const [busy, setBusy] = React.useState(false)
+        const [failure, setFailure] = React.useState(null)
+        const [done, setDone] = React.useState(null)
+
+        // Re-read on every render: the key is written by the workspace domain
+        // outside React, and the cost is one JSON parse.
+        const sessionId = currentSessionId()
+        const cwd = sessionId === undefined ? undefined : sessions.byId?.[sessionId]?.cwd
+        const workspaceId = React.useMemo(() => {
+          if (sessionId === undefined || workspaces.phase !== 'ready') return undefined
+          for (const item of workspaces.items) {
+            if (Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionId)) return item.workspaceId
+          }
+          return undefined
+        }, [sessionId, workspaces])
+
+        // Only offer the switch when there is a real conversation sitting in a
+        // non-worktree checkout; everywhere else the bar stays out of the way.
+        if (cwd === undefined || cwd === '' || isWorktreePath(cwd)) return null
+
+        const switchToWorktree = async () => {
+          if (busy) return
+          setBusy(true)
+          setFailure(null)
+          setDone(null)
+          try {
+            const result = await prepare(cwd, '', true, undefined)
+            const uiWorkspace = services.uiWorkspace()
+            if (uiWorkspace === undefined) throw httpError(0, 'create-failed', 'workspace service unavailable')
+            if (result.workspaceId === undefined) throw httpError(0, 'create-failed', 'workspace unavailable')
+            uiWorkspace.startSession(result.workspaceId, {
+              prompt: t('migratePrompt').replaceAll('{path}', result.path),
+              clearPreviousDraft: true,
+            })
+            setDone(result.branch)
+          } catch (error) {
+            setFailure(error.code ?? 'create-failed')
+          } finally {
+            setBusy(false)
+          }
+        }
+
+        const label = busy
+          ? t('statusBusy')
+          : done === null
+            ? t('statusSwitch')
+            : `${t('statusDone')} ${done}`
+        const failureText = failure === null ? null : t(ERROR_KEY[failure] ?? 'errorUnknown')
+
+        return h('div', { style: S.statusBar }, [
+          h('div', { key: 'left', style: S.statusLeft }, [
+            h('span', { key: 'cwd', style: S.statusPath, title: cwd }, cwd),
+          ]),
+          h('div', { key: 'right', style: S.statusRight }, [
+            failureText === null ? null : h('span', { key: 'err', style: S.error }, failureText),
+            h(Button, {
+              key: 'switch',
+              variant: 'ghost',
+              disabled: busy || workspaceId === undefined,
+              onClick: () => { void switchToWorktree() },
+            }, label),
+          ]),
+        ])
+      }
+    }
+
     return {
       inject: ['slots', 'locale', 'uiWorkspace'],
       apply(ctx) {
         ensureOrderCss()
         const Control = createControl({ uiWorkspace: () => ctx.get('uiWorkspace') })
+        const StatusBar = createStatusBar({ uiWorkspace: () => ctx.get('uiWorkspace') })
         ctx.effect(() => ctx.locale.register(NS, 'en', DICTS.en), 'branch-worktree: dictionary (en)')
         ctx.effect(() => ctx.locale.register(NS, 'zh', DICTS.zh), 'branch-worktree: dictionary (zh)')
         ctx.effect(() => () => {
@@ -635,6 +792,13 @@ window.__ModuleLoader__.load({
           order: -10,
           locale: NS,
         }, Control))
+        // The bottom bar is where a user notices "I am still on the main
+        // checkout" while a conversation is already running — the New Session
+        // chip is long gone by then.
+        ctx.slots.inject('shell.bottom', () => ctx.slots.register({
+          name: 'shell.bottom',
+          locale: NS,
+        }, StatusBar))
       },
     }
   },

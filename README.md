@@ -101,13 +101,29 @@ The session opens in the resulting directory, and the workspace appears in the s
 This is the default: **open the panel, press Start, done.**
 
 - Generated branches live under a `wt/` namespace, so they are easy to tell apart from branches you named yourself.
-- The name comes from the **draft prompt you already typed**: "fix the login crash" becomes `wt/fix-the-login-crash`. Without a usable draft it falls back to a timestamp, such as `wt/20261103-153102`.
-- A non-ASCII draft (Chinese, for example) is not transliterated; the timestamp fallback is used instead, so generated refs stay legal and readable.
-- Collisions are suffixed automatically (`wt/fix-the-login-crash-2`), checking both branches and `.worktrees/` directories.
+- The name is **random and readable**: an adjective, a noun, and a short tag — `wt/brave-otter-7f3a`.
+- **It is never derived from your conversation.** A worktree name is a durable Git ref that outlives the prompt that happened to be in the box: deriving it from a draft would leak prompt text into branch names, into `git log` output, and into anything the branch is pushed to — and two unrelated branches would collide on the same sentence. The draft still travels with you into the new session; it just does not name the branch.
+- Collisions are retried automatically against **both** existing branches and `.worktrees/` directory names, including the ones that only collide after the slash is flattened (`wt/a-b` and `wt/a/b` both map to `wt-a-b`).
 - The panel **previews the name and path** under *Will create* before you commit, so automatic never means opaque.
 - What is previewed is what is created: the displayed name is sent to the Host verbatim.
 
 Turn **Auto name** off to get exactly the manual behavior described below.
+
+### Switching an in-progress session into a new worktree
+
+The New Session chip only exists while the session is blank. Once a conversation
+is running there is a second entry point: a thin **status bar across the bottom
+of the window** shows the current working directory, and — while that directory
+is *not* already a worktree — a **New worktree** button.
+
+Clicking it creates a fresh `wt/…` worktree, opens a session bound to it, and
+sends the model a message saying the directory has moved, so it knows to carry
+over uncommitted work and to point any teammate or subagent it delegates to at
+the new path. A DSH session's directory is fixed at creation, so this hands you
+a *new* session in the worktree rather than relocating the old one.
+
+The bar hides itself as soon as the current directory is inside `.worktrees/`,
+which keeps it out of the way once you are already isolated.
 
 ### What the worktree toggle actually does
 

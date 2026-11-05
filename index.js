@@ -42,6 +42,43 @@ const BRANCH_PATTERN = /^[A-Za-z0-9._\/-]{1,120}$/
  */
 const AUTO_BRANCH_PREFIX = 'wt/'
 
+/**
+ * Word lists for generated names.
+ *
+ * The name is a readable pair plus a short random tag (`wt/brave-otter-7f3a`).
+ * It deliberately does NOT derive from the conversation: the draft prompt is
+ * chat content, and a worktree name is a durable Git ref that outlives the
+ * prompt that happened to be in the box at creation time. Two unrelated
+ * branches must not collide just because the user typed the same sentence, and
+ * a name must not leak prompt text into `git branch` output, shell history, or
+ * a shared remote.
+ */
+const NAME_ADJECTIVES = [
+  'amber', 'brave', 'bright', 'calm', 'clever', 'coral', 'crisp', 'eager',
+  'fancy', 'gentle', 'glad', 'golden', 'grand', 'happy', 'honest', 'humble',
+  'jolly', 'keen', 'kind', 'lively', 'lucky', 'mellow', 'merry', 'mighty',
+  'neat', 'noble', 'plain', 'proud', 'quick', 'quiet', 'rapid', 'ready',
+  'silent', 'silly', 'smooth', 'solid', 'spry', 'steady', 'sunny', 'swift',
+  'tidy', 'vivid', 'warm', 'wise', 'witty', 'young', 'zesty', 'breezy',
+]
+
+/** Nouns used as the readable half of a generated name. */
+const NAME_NOUNS = [
+  'anchor', 'arrow', 'badger', 'beacon', 'birch', 'brook', 'cabin', 'canyon',
+  'cedar', 'comet', 'crane', 'delta', 'ember', 'falcon', 'fern', 'field',
+  'finch', 'forge', 'grove', 'harbor', 'heron', 'hollow', 'island', 'lantern',
+  'maple', 'meadow', 'mesa', 'otter', 'pebble', 'pine', 'plain', 'prairie',
+  'quartz', 'raven', 'reef', 'ridge', 'river', 'robin', 'saddle', 'shade',
+  'shore', 'slate', 'sparrow', 'spruce', 'stone', 'summit', 'thistle', 'trail',
+  'valley', 'willow',
+]
+
+/** Alphabet for the short random tag; avoids look-alike characters. */
+const NAME_TAG_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz'
+
+/** Length of the random tag appended to every generated name. */
+const NAME_TAG_LENGTH = 4
+
 /** Environment stripped from every Git child: repository selectors only. */
 const GIT_ENV_OVERRIDES = {
   GIT_DIR: undefined,
@@ -140,32 +177,26 @@ function worktreeDirName(branch) {
 }
 
 /**
- * Format one instant as a compact, branch-safe stamp in local time.
- * @param {Date} date - the instant to stamp.
- * @returns {string} `YYYYMMDD-HHmmss`, which is legal inside a Git ref segment.
+ * Draw one uniformly random element from a list.
+ * @param {readonly string[]} items - source list.
+ * @param {() => number} random - uniform [0,1) source, injected for tests.
+ * @returns {string} the chosen element.
  */
-function nameStamp(date) {
-  const pad = (value) => String(value).padStart(2, '0')
-  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
-    + `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+function pick(items, random) {
+  return items[Math.floor(random() * items.length) % items.length]
 }
 
 /**
- * Turn an unsent draft prompt into a readable ref segment.
- *
- * Only ASCII letters and digits survive: a prompt in any other script (or one
- * that is mostly punctuation) yields no seed, and the caller falls back to a
- * timestamp. That keeps generated refs portable across Git hosting providers.
- *
- * @param {unknown} seed - the draft prompt, when the client had one.
- * @returns {string} a lowercase `-`-joined slug, possibly empty.
+ * Compose one readable random name: `<adjective>-<noun>-<tag>`.
+ * @param {() => number} random - uniform [0,1) source.
+ * @returns {string} a name fragment, always legal inside a Git ref segment.
  */
-function nameSlug(seed) {
-  if (typeof seed !== 'string') return ''
-  const slug = seed.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+/, '').replace(/-+$/, '')
-  if (slug === '') return ''
-  const clipped = slug.length > 32 ? slug.slice(0, 32).replace(/-+$/, '') : slug
-  return clipped
+function randomNameStem(random) {
+  const tag = Array.from(
+    { length: NAME_TAG_LENGTH },
+    () => NAME_TAG_ALPHABET[Math.floor(random() * NAME_TAG_ALPHABET.length) % NAME_TAG_ALPHABET.length],
+  ).join('')
+  return `${pick(NAME_ADJECTIVES, random)}-${pick(NAME_NOUNS, random)}-${tag}`
 }
 
 /**
@@ -176,18 +207,24 @@ function nameSlug(seed) {
  * the branch and its future worktree directory are checked, because either one
  * existing would make `git worktree add` fail.
  *
+ * The name is random rather than derived from the prompt or the clock: the tag
+ * already makes collisions unlikely, and the checks below retry a few dozen
+ * times before giving up, so "sometimes it fails to create" never comes from
+ * name selection.
+ *
  * @param {object} status - repository status from {@link inspectRepository}.
- * @param {unknown} seed - optional draft prompt used as a readable stem.
- * @param {Date} now - clock injection point for tests.
+ * @param {() => number} random - uniform [0,1) source, injected for tests.
  * @returns {Promise<string>} a free branch name.
  */
-async function generateBranchName(status, seed, now = new Date()) {
-  const slug = nameSlug(seed)
-  const stem = slug === '' ? nameStamp(now) : slug
-  for (let index = 1; index <= 50; index += 1) {
-    const candidate = index === 1 ? `${AUTO_BRANCH_PREFIX}${stem}` : `${AUTO_BRANCH_PREFIX}${stem}-${index}`
+async function generateBranchName(status, random = Math.random) {
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const candidate = `${AUTO_BRANCH_PREFIX}${randomNameStem(random)}`
     if (status.branches.some((entry) => entry.name === candidate)) continue
-    if (await isDirectory(join(status.worktreeRoot, worktreeDirName(candidate)))) continue
+    // The directory name loses the `wt/` slash, so two distinct branches can
+    // map to one directory (`wt/a-b` and `wt/a/b`). Checking the mapped
+    // directory, not the raw ref, is what keeps `git worktree add` from failing
+    // on a path that is already taken.
+    if (status.worktreeDirs.has(worktreeDirName(candidate))) continue
     return candidate
   }
   throw new BranchWorktreeError('name-exhausted', `could not find a free automatic branch name under ${AUTO_BRANCH_PREFIX}`)
@@ -219,22 +256,12 @@ async function inspectRepository(cwd) {
   if (probe.code !== 0) {
     return { isRepo: false, cwd }
   }
-  const repositoryRoot = probe.stdout.trim()
-  const gitDir = (await gitOrFail(repositoryRoot, ['rev-parse', '--absolute-git-dir'])).trim()
-
-  const currentBranch = (await git(repositoryRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim() || 'HEAD'
-
-  // Local branches, newest commit first; the checked-out ones are marked so the
-  // picker never offers a branch another checkout already holds.
-  const refs = await gitOrFail(repositoryRoot, [
-    'for-each-ref',
-    '--sort=-committerdate',
-    '--format=%(refname:short)',
-    'refs/heads',
-  ])
-  const branches = refs.split('\n').map((line) => line.trim()).filter((line) => line !== '')
-
-  const worktreesOutput = await gitOrFail(repositoryRoot, ['worktree', 'list', '--porcelain'])
+  // `--show-toplevel` answers with the CURRENT checkout, which is the linked
+  // worktree itself when the workspace already lives under `.worktrees/`. That
+  // is not the repository: using it as the root would nest a new pool inside
+  // the old worktree and read the wrong branch list. `git worktree list` always
+  // prints the main checkout first, so take the root from there.
+  const worktreesOutput = await gitOrFail(cwd, ['worktree', 'list', '--porcelain'])
   const worktrees = []
   let pending = {}
   for (const line of worktreesOutput.split('\n')) {
@@ -251,25 +278,56 @@ async function inspectRepository(cwd) {
   }
   if (pending.path !== undefined) worktrees.push(pending)
 
+  const mainWorktree = worktrees[0]
+  if (mainWorktree === undefined) {
+    throw new BranchWorktreeError('not-a-repo', 'this Git repository has no working tree')
+  }
+  const repositoryRoot = mainWorktree.path
+  const gitDir = (await gitOrFail(repositoryRoot, ['rev-parse', '--git-common-dir'])).trim()
+  const absoluteGitDir = isAbsolute(gitDir) ? gitDir : join(repositoryRoot, gitDir)
+
+  const currentBranch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim() || 'HEAD'
+
+  // Local branches, newest commit first; the checked-out ones are marked so the
+  // picker never offers a branch another checkout already holds.
+  const refs = await gitOrFail(repositoryRoot, [
+    'for-each-ref',
+    '--sort=-committerdate',
+    '--format=%(refname:short)',
+    'refs/heads',
+  ])
+  const branches = refs.split('\n').map((line) => line.trim()).filter((line) => line !== '')
+
   const checkedOut = new Map()
   for (const entry of worktrees) {
     if (entry.branch !== '' && !entry.branch.startsWith('(')) checkedOut.set(entry.branch, entry.path)
   }
 
   // The branch a new worktree should start from: the repository's own default
-  // when it exists, else whatever is checked out here.
+  // when it exists, else whatever is checked out here, else the first branch.
+  // `main` is only a fallback for repositories that still use it — a repository
+  // on `master` must not be told to branch off a `main` that does not exist.
   const symbolic = await git(repositoryRoot, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
   const originHead = symbolic.code === 0 ? symbolic.stdout.trim().replace('origin/', '') : ''
-  const base = branches.includes(originHead) ? originHead : (branches.includes('main') ? 'main' : currentBranch)
+  const base = [originHead, 'main', 'master', currentBranch, branches[0]]
+    .find((candidate) => candidate !== undefined && candidate !== '' && branches.includes(candidate)) ?? currentBranch
 
   const status = await git(repositoryRoot, ['status', '--porcelain'])
   const dirty = status.stdout.trim() !== ''
+
+  // Every existing worktree directory name, so name generation can avoid the
+  // collisions that only show up in the mapped directory (`wt/a-b` vs `wt/a/b`).
+  const worktreeDirs = new Set()
+  for (const entry of worktrees) {
+    const name = entry.path.split(/[\\/]/).pop()
+    if (name !== undefined && name !== '') worktreeDirs.add(name)
+  }
 
   return {
     isRepo: true,
     cwd,
     repositoryRoot,
-    gitDir,
+    gitDir: absoluteGitDir,
     currentBranch,
     baseBranch: base,
     dirty,
@@ -280,6 +338,7 @@ async function inspectRepository(cwd) {
       checkedOutAt: checkedOut.get(branch) ?? null,
     })),
     worktrees,
+    worktreeDirs,
   }
 }
 
@@ -341,7 +400,14 @@ async function ensureWorktree(status, branch, baseBranch) {
 
   const path = join(root, worktreeDirName(branch))
   if (await isDirectory(path)) {
-    throw new BranchWorktreeError('path-exists', `the worktree directory already exists: ${path}`)
+    // The mapped directory is shared by refs that differ only in where their
+    // slashes fall (`wt/a-b` and `wt/a/b`), so name the collision instead of
+    // reporting a bare path clash the user cannot act on.
+    const holder = status.worktrees.find((entry) => entry.path === path)
+    const detail = holder?.branch !== undefined && holder.branch !== ''
+      ? `it already holds branch "${holder.branch}"`
+      : 'it is not a worktree of this repository'
+    throw new BranchWorktreeError('path-exists', `the worktree directory for "${branch}" already exists (${detail}): ${path}`)
   }
 
   const branchExists = status.branches.some((entry) => entry.name === branch)
@@ -355,16 +421,24 @@ async function ensureWorktree(status, branch, baseBranch) {
   return { path, branch, created: !branchExists, reusedWorktree: false }
 }
 
-/** Check one branch out in the repository's own checkout; requires a clean tree. */
+/**
+ * Check one branch out in the repository's own checkout; requires a clean tree.
+ *
+ * Staying on the branch that is already checked out is a no-op: the user asked
+ * for "no worktree, keep my working copy", and refusing that because the tree
+ * has uncommitted edits would make a repository with any pending work
+ * unstartable. Uncommitted changes only block an actual branch SWITCH, which
+ * Git itself would refuse.
+ */
 async function checkoutInPlace(status, branch) {
+  if (status.currentBranch === branch) {
+    return { path: status.repositoryRoot, branch, created: false, reusedWorktree: false }
+  }
   if (status.dirty) {
     throw new BranchWorktreeError(
       'worktree-dirty',
-      'this checkout has uncommitted changes; enable "create worktree" or commit them first',
+      `this checkout has uncommitted changes, so it cannot switch to "${branch}"; keep the branch you are on, commit the changes, or enable "create worktree"`,
     )
-  }
-  if (status.currentBranch === branch) {
-    return { path: status.repositoryRoot, branch, created: false, reusedWorktree: false }
   }
   const branchExists = status.branches.some((entry) => entry.name === branch)
   const args = branchExists ? ['checkout', branch] : ['checkout', '-b', branch, validateBranch(status.baseBranch)]
@@ -465,18 +539,17 @@ export function apply(ctx) {
       }
       const url = new URL(req.url ?? '/', 'http://dsh.invalid')
       const cwd = url.searchParams.get('cwd') ?? ''
-      const seed = url.searchParams.get('seed') ?? ''
       try {
         const status = await inspectRepository(cwd)
         if (status.isRepo !== true) {
           throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
         }
-        const branch = await generateBranchName(status, seed)
+        const branch = await generateBranchName(status)
         sendJson(res, 200, {
           ok: true,
           branch,
           worktreePath: join(status.worktreeRoot, worktreeDirName(branch)),
-          baseBranch: status.currentBranch,
+          baseBranch: status.baseBranch,
         })
       } catch (error) {
         const known = error instanceof BranchWorktreeError
@@ -526,7 +599,7 @@ export function apply(ctx) {
         // created; this branch only answers a caller that asked for none.
         const requested = typeof body.branch === 'string' ? body.branch.trim() : ''
         const branch = requested === ''
-          ? validateBranch(await generateBranchName(status, body.seed))
+          ? validateBranch(await generateBranchName(status))
           : validateBranch(requested)
         const baseBranch = validateBranch(typeof body.base === 'string' && body.base !== '' ? body.base : status.baseBranch)
         const checkout = useWorktree
