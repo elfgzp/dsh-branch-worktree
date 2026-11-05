@@ -258,14 +258,19 @@ window.__ModuleLoader__.load({
       },
       statusLeft: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: '1 1 auto' },
       statusRight: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
+      /**
+       * Long paths must stay readable from the end (the tail identifies the
+       * checkout, the prefix is shared). `direction: rtl` would do that but also
+       * moves the leading `/` to the end, so the string is truncated here
+       * instead and rendered with the normal direction.
+       */
       statusPath: {
         fontFamily: 'var(--dsw-alias-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
         fontSize: 11,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
-        direction: 'rtl',
-        textAlign: 'left',
+        minWidth: 0,
       },
     }
 
@@ -682,6 +687,22 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * Shorten a long path for the status bar, keeping the tail readable.
+     *
+     * The tail names the checkout; the leading directories are usually shared
+     * with everything else the user works on, so they are what gets dropped.
+     *
+     * @param {string} path - absolute path.
+     * @returns {string} the path, elided in the middle when it is long.
+     */
+    function shortPath(path) {
+      if (typeof path !== 'string') return ''
+      const parts = path.split(/[\\/]/).filter((piece) => piece !== '')
+      if (parts.length <= 4) return path
+      return `…/${parts.slice(-3).join('/')}`
+    }
+
     /** Whether a path is a checkout this plugin created under `.worktrees/`. */
     function isWorktreePath(path) {
       return typeof path === 'string' && /[\\/]\.worktrees[\\/]/.test(path)
@@ -759,7 +780,7 @@ window.__ModuleLoader__.load({
 
         return h('div', { style: S.statusBar }, [
           h('div', { key: 'left', style: S.statusLeft }, [
-            h('span', { key: 'cwd', style: S.statusPath, title: cwd }, cwd),
+            h('span', { key: 'cwd', style: S.statusPath, title: cwd }, shortPath(cwd)),
           ]),
           h('div', { key: 'right', style: S.statusRight }, [
             failureText === null ? null : h('span', { key: 'err', style: S.error }, failureText),

@@ -202,7 +202,10 @@ console.log('\n[2] status bar — hidden when already in a worktree, shown on th
   const e = await mount('shell.bottom', s5)
   const btn = [...e.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
   check('shown on the main checkout', btn !== undefined, e.el.textContent)
-  check('path is displayed', e.el.textContent.includes(repoDir), e.el.textContent)
+  // The bar shortens long paths to `…/last/three/segments` so the tail (which
+  // identifies the checkout) stays visible; assert on the tail, not the prefix.
+  const tail = repoDir.split('/').slice(-3).join('/')
+  check('path is displayed (tail readable)', e.el.textContent.includes(tail), e.el.textContent)
   await React.act(async () => { e.root.unmount() })
 }
 
