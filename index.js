@@ -489,6 +489,10 @@ export function apply(ctx) {
   const webServer = ctx.get('webServer')
   const connection = ctx.get('connection')
   const workspaceRegistry = ctx.get('workspaceRegistry')
+  // Optional: used by the in-place switch. Both are resolved per request so a
+  // composition without them still serves the New-Session routes.
+  const workingDirectory = ctx.get('workingDirectory')
+  const agents = ctx.get('agents')
   if (webServer === undefined || connection === undefined || workspaceRegistry === undefined) {
     throw new Error('branch-worktree: the web composition (webServer, connection, workspaceRegistry) is required')
   }
@@ -606,11 +610,15 @@ export function apply(ctx) {
           ? await ensureWorktree(status, branch, baseBranch)
           : await checkoutInPlace(status, branch)
 
-        // Register the checkout as a Workspace so the ordinary Session-create
-        // path can start the conversation inside it. `create` canonicalizes the
-        // directory and returns the existing registration for a repeated
-        // request, so asking again never duplicates a sidebar group.
-        const workspaceId = (await workspaceRegistry.create(checkout.path, branch)).id
+        // Registering the checkout as a Workspace is only needed by the
+        // New-Session path, which has to hand a workspace id to
+        // `uiWorkspace.startSession`. The in-place switch rebinds an EXISTING
+        // session instead and must leave the workspace list alone, so it opts
+        // out with `registerWorkspace: false`.
+        const registerWorkspace = body.registerWorkspace !== false
+        const workspaceId = registerWorkspace
+          ? (await workspaceRegistry.create(checkout.path, branch)).id
+          : undefined
 
         sendJson(res, 200, {
           ok: true,
@@ -620,7 +628,7 @@ export function apply(ctx) {
           reusedWorktree: checkout.reusedWorktree,
           worktree: useWorktree,
           repositoryRoot: status.repositoryRoot,
-          workspaceId,
+          ...(workspaceId === undefined ? {} : { workspaceId }),
         })
       } catch (error) {
         const known = error instanceof BranchWorktreeError
@@ -633,4 +641,95 @@ export function apply(ctx) {
       }
     },
   }), 'branch-worktree: create route')
+
+  // In-place switch: create a worktree for a Session that is already running
+  // and move THAT Session's working directory onto it.
+  //
+  // This is deliberately not the New-Session path. Creating a worktree Workspace
+  // and opening a session there would leave the user with a second workspace
+  // group and a second conversation, when what they asked for is "keep this
+  // conversation, work somewhere isolated". `workingDirectory.set` is the same
+  // mechanism the shipped `create_worktree` tool uses: it appends a durable
+  // `working-directory/change` record AND queues a notice for the model, so no
+  // hand-typed message is needed.
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: `${PREFIX}/switch`,
+    async handler(req, res) {
+      if (rejected(req, res)) return
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { code: 'bad-request', message: 'POST required' })
+        return
+      }
+      const essence = String(req.headers['content-type'] ?? '').split(';', 1)[0]?.trim().toLowerCase()
+      if (essence !== 'application/json') {
+        sendJson(res, 415, { code: 'bad-request', message: 'content-type must be application/json' })
+        return
+      }
+      let body
+      try {
+        body = JSON.parse(await readBody(req))
+      } catch {
+        sendJson(res, 400, { code: 'bad-request', message: 'request body must be JSON' })
+        return
+      }
+      if (typeof body !== 'object' || body === null) {
+        sendJson(res, 400, { code: 'bad-request', message: 'request body must be an object' })
+        return
+      }
+      try {
+        if (workingDirectory === undefined || agents === undefined) {
+          throw new BranchWorktreeError(
+            'switch-unavailable',
+            'this composition cannot move a running session between directories (workingDirectory is not installed)',
+          )
+        }
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+        if (sessionId === '') throw new BranchWorktreeError('bad-request', 'sessionId is required')
+        const agent = agents.get(sessionId)
+        if (agent === undefined) {
+          throw new BranchWorktreeError(
+            'switch-unavailable',
+            'that session is not running, so its directory cannot be changed in place; open it first',
+          )
+        }
+
+        const status = await inspectRepository(body.cwd)
+        if (status.isRepo !== true) {
+          throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
+        }
+        // Refuse when the session is already isolated: switching again would
+        // build a worktree of a worktree.
+        if (status.cwd.includes(`${WORKTREE_DIRNAME}/`) || status.cwd.includes(`${WORKTREE_DIRNAME}\\`)) {
+          throw new BranchWorktreeError('already-worktree', 'this session is already working inside a worktree')
+        }
+
+        const branch = validateBranch(await generateBranchName(status))
+        const checkout = await ensureWorktree(status, branch, status.baseBranch)
+
+        // The actual move. `set` canonicalizes the path, appends the durable
+        // change record, and queues the model notice; it throws when the target
+        // is not an existing directory, so a failed worktree never silently
+        // leaves the session pointed at nothing.
+        const moved = await workingDirectory.set(agent, checkout.path)
+
+        sendJson(res, 200, {
+          ok: true,
+          sessionId,
+          path: moved,
+          branch: checkout.branch,
+          branchCreated: checkout.created,
+          repositoryRoot: status.repositoryRoot,
+        })
+      } catch (error) {
+        const known = error instanceof BranchWorktreeError
+        ctx.logger.warn?.(`branch-worktree: switch failed: ${error instanceof Error ? error.message : String(error)}`)
+        sendJson(res, known ? 400 : 500, {
+          ok: false,
+          code: known ? error.code : 'switch-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+  }), 'branch-worktree: switch route')
 }

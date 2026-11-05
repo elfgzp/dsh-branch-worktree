@@ -52,12 +52,9 @@ window.__ModuleLoader__.load({
         errorUnknown: 'The checkout could not be prepared.',
         statusSwitch: 'New worktree',
         statusBusy: 'Creating worktree…',
-        statusDone: 'Created',
-        migratePrompt: 'I switched this session to a new Git worktree at {path}. '
-          + 'Move any in-progress work (files not yet committed) into that directory first, '
-          + 'and tell the user if anything could not be moved. '
-          + 'Also note the new path for any teammate or subagent you delegate to: '
-          + 'they must be pointed at {path}, because the previous working directory is now a different checkout.',
+        statusDone: 'Moved to',
+        errorAlreadyWorktree: 'This session is already working inside a worktree.',
+        errorSwitchUnavailable: 'A running session has to be open before it can be moved; reopen it and try again.',
       },
       zh: {
         chip: '分支',
@@ -91,12 +88,9 @@ window.__ModuleLoader__.load({
         errorUnknown: '无法准备检出目录。',
         statusSwitch: '新建 worktree',
         statusBusy: '正在创建 worktree…',
-        statusDone: '已创建',
-        migratePrompt: '我已经把当前会话切换到一个新的 Git worktree：{path}。'
-          + '请先把还没提交的改动（工作区里未提交的文件）搬到这个新目录，'
-          + '如果有的文件搬不过去，告诉用户。'
-          + '另外，之后交给团队成员或子智能体的任务，都要把工作目录指向 {path}，'
-          + '因为原来的目录已经是另一个检出了。',
+        statusDone: '已切到',
+        errorAlreadyWorktree: '这个会话已经在 worktree 里了。',
+        errorSwitchUnavailable: '会话必须处于运行状态才能原地切换目录，请先重新打开它。',
       },
     }
 
@@ -110,6 +104,8 @@ window.__ModuleLoader__.load({
       'path-exists': 'errorPathExists',
       'worktree-dirty': 'errorDirty',
       'git-failed': 'errorGit',
+      'already-worktree': 'errorAlreadyWorktree',
+      'switch-unavailable': 'errorSwitchUnavailable',
     }
 
     /** Styling that mirrors the shipped workspace and preset chips. */
@@ -358,6 +354,26 @@ window.__ModuleLoader__.load({
       })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'create-failed', '')
+      if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
+      return payload
+    }
+
+    /**
+     * Move a RUNNING session's working directory onto a new worktree.
+     *
+     * Unlike `prepare`, this neither registers a Workspace nor opens a new
+     * session: the Host appends a durable working-directory change to the same
+     * conversation and queues the model a notice. That is why the user does not
+     * have to type anything to tell the model it moved.
+     */
+    async function switchInPlace(cwd, sessionId) {
+      const response = await fetch(new URL(`${PREFIX}/switch`, hostBase()), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd, sessionId }),
+      })
+      const payload = await response.json().catch(() => undefined)
+      if (payload === undefined) throw httpError(response.status, 'switch-failed', '')
       if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
       return payload
     }
@@ -723,7 +739,7 @@ window.__ModuleLoader__.load({
      * @param services - late-bound client services resolved per interaction.
      * @returns the `shell.bottom` occupant component.
      */
-    function createStatusBar(services) {
+    function createStatusBar() {
       return function BranchWorktreeStatusBar(props) {
         const { t, useSessions, useWorkspaces } = props
         const workspaces = useWorkspaces((state) => state)
@@ -771,22 +787,18 @@ window.__ModuleLoader__.load({
         if (cwd === undefined || cwd === '' || repoState !== 'repo' || isWorktreePath(cwd)) return null
 
         const switchToWorktree = async () => {
-          if (busy) return
+          if (busy || sessionId === undefined) return
           setBusy(true)
           setFailure(null)
           setDone(null)
           try {
-            const result = await prepare(cwd, '', true, undefined)
-            const uiWorkspace = services.uiWorkspace()
-            if (uiWorkspace === undefined) throw httpError(0, 'create-failed', 'workspace service unavailable')
-            if (result.workspaceId === undefined) throw httpError(0, 'create-failed', 'workspace unavailable')
-            uiWorkspace.startSession(result.workspaceId, {
-              prompt: t('migratePrompt').replaceAll('{path}', result.path),
-              clearPreviousDraft: true,
-            })
+            // Rebind THIS conversation. No new workspace appears in the
+            // sidebar and no prompt is typed on the user's behalf: the Host
+            // commits the directory change and queues the model a notice.
+            const result = await switchInPlace(cwd, sessionId)
             setDone(result.branch)
           } catch (error) {
-            setFailure(error.code ?? 'create-failed')
+            setFailure(error.code ?? 'switch-failed')
           } finally {
             setBusy(false)
           }
@@ -821,7 +833,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ensureOrderCss()
         const Control = createControl({ uiWorkspace: () => ctx.get('uiWorkspace') })
-        const StatusBar = createStatusBar({ uiWorkspace: () => ctx.get('uiWorkspace') })
+        const StatusBar = createStatusBar()
         ctx.effect(() => ctx.locale.register(NS, 'en', DICTS.en), 'branch-worktree: dictionary (en)')
         ctx.effect(() => ctx.locale.register(NS, 'zh', DICTS.zh), 'branch-worktree: dictionary (zh)')
         ctx.effect(() => () => {

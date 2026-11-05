@@ -50,10 +50,22 @@ console.error = (...a) => { errors.push(a.map(String).join(' ')); origError('[RE
 // --- real Host routes ---
 const mod = await import(HOST)
 const routes = new Map()
+// The Host stub models the two services the in-place switch needs, so the test
+// exercises the REAL route: it fails if the Host stops rebinding sessions.
+const LIVE_SESSIONS = new Set()
+const workingDirectory = {
+  async set(agent, path) { switched.push([agent.sessionId, path]); return path },
+}
+const agents = {
+  get: (sessionId) => (LIVE_SESSIONS.has(sessionId) ? { sessionId } : undefined),
+}
 mod.apply({
   get: (n) => n === 'webServer' ? { register: (r) => { routes.set(r.path, r.handler); return () => {} } }
     : n === 'connection' ? { requestRejection: () => undefined }
-    : n === 'workspaceRegistry' ? { create: async (p) => ({ id: `ws-${p.split('/').pop()}` }) } : undefined,
+    : n === 'workspaceRegistry' ? { create: async (p, title) => { registeredWorkspaces.push([p, title]); return { id: `ws-${p.split('/').pop()}` } } }
+    : n === 'workingDirectory' ? workingDirectory
+    : n === 'agents' ? agents
+    : undefined,
   effect: (f) => f(), logger: { warn() {} },
 })
 const server = createServer(async (req, res) => {
@@ -82,6 +94,9 @@ dom.window.__ModuleLoader__ = { load(spec) { spec.factory((id) => id === 'react'
 new Function('window', 'document', 'globalThis', fs.readFileSync(CLIENT, 'utf8'))(dom.window, dom.window.document, globalThis)
 
 const started = []
+// Records in-place rebinds. The bar must NOT open sessions or workspaces.
+const switched = []
+const registeredWorkspaces = []
 const plugin = {
   get: (n) => n === 'uiWorkspace' ? { startSession: (...a) => started.push(a) } : undefined,
   effect: (fn) => (typeof fn === 'function' ? fn() : undefined),
@@ -248,30 +263,30 @@ console.log('\n[2b] status bar — absent in a directory that is not a Git repos
   check('no crash on the non-repo payload', !errors.some((e) => e.includes('Cannot read properties of undefined')), errors.slice(-2).join(' | '))
 }
 
-console.log('\n[3] status bar — clicking creates a worktree, switches Workspace, prompts migration')
+console.log('\n[3] status bar — clicking moves THIS session onto a new worktree')
 {
   localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's6' }))
+  LIVE_SESSIONS.add('s6')
   const s6 = { sessions: { s6: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w6', path: repoDir, sessionIds: ['s6'] }] }
   const f = await mount('shell.bottom', { ...s6, until: (el) => el.innerHTML.includes('data-bw-status') })
-  let btn = [...f.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
-  // The stub Button forwards onClick directly (real primitives do too), so read
-  // it off the element React attached rather than synthesising a DOM event.
+  const btn = [...f.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
   if (btn === undefined) throw new Error('switch button not found: ' + f.el.innerHTML.slice(0, 300))
   await React.act(async () => { btn.click() })
-  await waitFor(() => started.length > 0)
-  if (failures.length !== 0 && f.el.textContent.includes('error')) {
-    console.log('      bar text after click:', f.el.textContent)
-  }
+  await waitFor(() => switched.length > 0 || f.el.textContent.includes('已切到') || f.el.textContent.includes('Moved'))
 
   const list = git('worktree', 'list', '--porcelain')
   const created = list.split('\n').filter((l) => l.startsWith('worktree ') && l.includes('.worktrees/wt-'))
   check('a worktree was created', created.length === 1, list)
-  check('startSession was called', started.length === 1, JSON.stringify(started))
-  const [wsId, options] = started[0] ?? []
-  check('switched to the new workspace', String(wsId).startsWith('ws-wt-'), String(wsId))
-  const prompt = String(options?.prompt ?? '')
-  check('migration prompt carries the new path', prompt.includes('.worktrees/wt-'), prompt)
-  check('migration prompt mentions teammates/subagents', /teammate|subagent|团队成员|子智能体/i.test(prompt), prompt)
+
+  // The point of this feature: the SAME conversation moves. No second
+  // workspace, no second session, and nothing typed on the user's behalf.
+  check('the running session was rebound in place', switched.length === 1, JSON.stringify(switched))
+  const [sessionArg, pathArg] = switched[0] ?? []
+  check('rebound the CURRENT session id', sessionArg === 's6', String(sessionArg))
+  check('rebound onto the new worktree', String(pathArg).includes('.worktrees/wt-'), String(pathArg))
+  check('no new session was opened', started.length === 0, JSON.stringify(started))
+  check('no new workspace was registered', registeredWorkspaces.length === 0, JSON.stringify(registeredWorkspaces))
+  check('the bar reports the new branch', /已切到|Moved to/.test(f.el.textContent), f.el.textContent)
 }
 
 server.close()

@@ -17,11 +17,16 @@ import { createServer } from 'node:http'
 const mod = await import('../index.js')
 
 const routes = new Map()
+const LIVE = new Set()
+const rebinds = []
+const workspaceCreates = []
 const fakeCtx = {
   get(name) {
     if (name === 'webServer') return { register: (route) => { routes.set(route.path, route.handler); return () => {} } }
     if (name === 'connection') return { requestRejection: () => undefined }
-    if (name === 'workspaceRegistry') return { create: async (path, name) => ({ id: `ws-${path.split('/').pop()}`, title: name }) }
+    if (name === 'workspaceRegistry') return { create: async (path, name) => { workspaceCreates.push([path, name]); return { id: `ws-${path.split('/').pop()}`, title: name } } }
+    if (name === 'workingDirectory') return { set: async (agent, path) => { rebinds.push([agent.sessionId, path]); return path } }
+    if (name === 'agents') return { get: (id) => (LIVE.has(id) ? { sessionId: id } : undefined) }
     return undefined
   },
   effect(fn) { return fn() },
@@ -163,6 +168,31 @@ check('specific error code', c6.body.code === 'branch-is-main-checkout', c6.body
 
 console.log('\n[13] pool still excluded from git status after all of that')
 check('status shows only the edited file', git('status', '--porcelain').trim() === 'M README.md', JSON.stringify(git('status', '--porcelain')))
+
+console.log('\n[14] switch — an in-place rebind creates a worktree for the SAME session')
+LIVE.add('sess-live')
+const beforeRebinds = rebinds.length
+const beforeWorkspaces = workspaceCreates.length
+const sw = await post('/branch-worktree/switch', { cwd: repo, sessionId: 'sess-live' })
+check('switch ok', sw.body.ok === true, JSON.stringify(sw.body))
+check('reports the same session', sw.body.sessionId === 'sess-live', sw.body.sessionId)
+check('moved onto a worktree', String(sw.body.path).includes('.worktrees/wt-'), sw.body.path)
+check('the Host rebound the session', rebinds.length === beforeRebinds + 1, JSON.stringify(rebinds))
+check('rebound target is the new checkout', rebinds.at(-1)[1] === sw.body.path, JSON.stringify(rebinds.at(-1)))
+check('no workspace was created for it', sw.body.workspaceId === undefined, String(sw.body.workspaceId))
+// The returned id being absent is not enough: the in-place switch must not
+// touch the workspace registry AT ALL, or the sidebar grows a second group.
+check('workspace registry untouched', workspaceCreates.length === beforeWorkspaces, JSON.stringify(workspaceCreates.slice(beforeWorkspaces)))
+
+console.log('\n[15] switch — refuses what it cannot honestly do')
+const dead = await post('/branch-worktree/switch', { cwd: repo, sessionId: 'not-running' })
+check('refuses a session that is not running', dead.body.ok === false, JSON.stringify(dead.body))
+check('specific error code', dead.body.code === 'switch-unavailable', dead.body.code)
+const noSession = await post('/branch-worktree/switch', { cwd: repo })
+check('refuses a missing sessionId', noSession.body.ok === false, JSON.stringify(noSession.body))
+const insideWt = await post('/branch-worktree/switch', { cwd: join(repo, '.worktrees', c1Dir), sessionId: 'sess-live' })
+check('refuses to nest a worktree of a worktree', insideWt.body.ok === false, JSON.stringify(insideWt.body))
+check('specific error code', insideWt.body.code === 'already-worktree', insideWt.body.code)
 
 server.close()
 await rm(repo, { recursive: true, force: true })

@@ -109,21 +109,22 @@ This is the default: **open the panel, press Start, done.**
 
 Turn **Auto name** off to get exactly the manual behavior described below.
 
-### Switching an in-progress session into a new worktree
+### Moving a running session into a new worktree
 
 The New Session chip only exists while the session is blank. Once a conversation
 is running there is a second entry point: a thin **status bar across the bottom
 of the window** shows the current working directory, and — while that directory
-is *not* already a worktree — a **New worktree** button.
+is a Git repository that is not already a worktree — a **New worktree** button.
 
-Clicking it creates a fresh `wt/…` worktree, opens a session bound to it, and
-sends the model a message saying the directory has moved, so it knows to carry
-over uncommitted work and to point any teammate or subagent it delegates to at
-the new path. A DSH session's directory is fixed at creation, so this hands you
-a *new* session in the worktree rather than relocating the old one.
+Clicking it creates a `wt/…` worktree and moves **that same session** onto it.
+No second workspace appears in the sidebar and no second conversation is
+opened: the Host appends a durable working-directory change to the running
+conversation, which is the same mechanism the shipped `create_worktree` tool
+uses. The model is notified by the Host, so you never have to type "I moved the
+files, go look there" yourself.
 
-The bar hides itself as soon as the current directory is inside `.worktrees/`,
-which keeps it out of the way once you are already isolated.
+The bar hides itself as soon as the directory is inside `.worktrees/`, so it
+stops offering a switch once you are already isolated.
 
 ### What the worktree toggle actually does
 
