@@ -109,22 +109,25 @@ This is the default: **open the panel, press Start, done.**
 
 Turn **Auto name** off to get exactly the manual behavior described below.
 
-### Moving a running session into a new worktree
+### Moving a running conversation into a new worktree
 
 The New Session chip only exists while the session is blank. Once a conversation
 is running there is a second entry point: a thin **status bar across the bottom
 of the window** shows the current working directory, and — while that directory
 is a Git repository that is not already a worktree — a **New worktree** button.
 
-Clicking it creates a `wt/…` worktree and moves **that same session** onto it.
-No second workspace appears in the sidebar and no second conversation is
-opened: the Host appends a durable working-directory change to the running
-conversation, which is the same mechanism the shipped `create_worktree` tool
-uses. The model is notified by the Host, so you never have to type "I moved the
-files, go look there" yourself.
+One click creates a `wt/…` worktree, registers it as a Workspace, and opens a
+session there, so the file tree, the Git view and the changes list all point at
+the new checkout. A prompt is sent telling the model to carry over uncommitted
+work and to point any teammate or subagent at the new path.
 
-The bar hides itself as soon as the directory is inside `.worktrees/`, so it
-stops offering a switch once you are already isolated.
+**Why a workspace, rather than just moving the session?** DSH freezes a
+session's `cwd` in its header at creation, and every panel roots itself on that
+header — moving only the agent's working directory leaves the whole right-hand
+side showing the old path. A workspace whose path *is* the checkout is the only
+shape where the UI actually follows.
+
+The bar hides itself once the directory is inside `.worktrees/`.
 
 ### What the worktree toggle actually does
 

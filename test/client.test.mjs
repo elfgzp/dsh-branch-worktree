@@ -263,29 +263,31 @@ console.log('\n[2b] status bar — absent in a directory that is not a Git repos
   check('no crash on the non-repo payload', !errors.some((e) => e.includes('Cannot read properties of undefined')), errors.slice(-2).join(' | '))
 }
 
-console.log('\n[3] status bar — clicking moves THIS session onto a new worktree')
+console.log('\n[3] status bar — clicking opens a session in the new worktree workspace')
 {
   localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's6' }))
-  LIVE_SESSIONS.add('s6')
   const s6 = { sessions: { s6: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w6', path: repoDir, sessionIds: ['s6'] }] }
   const f = await mount('shell.bottom', { ...s6, until: (el) => el.innerHTML.includes('data-bw-status') })
   const btn = [...f.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
   if (btn === undefined) throw new Error('switch button not found: ' + f.el.innerHTML.slice(0, 300))
   await React.act(async () => { btn.click() })
-  await waitFor(() => switched.length > 0 || f.el.textContent.includes('已切到') || f.el.textContent.includes('Moved'))
+  await waitFor(() => started.length > 0 || f.el.textContent.includes('已切到') || f.el.textContent.includes('Moved'))
 
   const list = git('worktree', 'list', '--porcelain')
   const created = list.split('\n').filter((l) => l.startsWith('worktree ') && l.includes('.worktrees/wt-'))
   check('a worktree was created', created.length === 1, list)
 
-  // The point of this feature: the SAME conversation moves. No second
-  // workspace, no second session, and nothing typed on the user's behalf.
-  check('the running session was rebound in place', switched.length === 1, JSON.stringify(switched))
-  const [sessionArg, pathArg] = switched[0] ?? []
-  check('rebound the CURRENT session id', sessionArg === 's6', String(sessionArg))
-  check('rebound onto the new worktree', String(pathArg).includes('.worktrees/wt-'), String(pathArg))
-  check('no new session was opened', started.length === 0, JSON.stringify(started))
-  check('no new workspace was registered', registeredWorkspaces.length === 0, JSON.stringify(registeredWorkspaces))
+  // A workspace whose path IS the checkout is the only arrangement DSH accepts
+  // to make the panels follow: header.cwd is frozen, session summaries read it,
+  // and the file tree / Git view / changes list all root themselves on it.
+  check('a workspace was registered for the checkout', registeredWorkspaces.length === 1, JSON.stringify(registeredWorkspaces))
+  check('workspace path is the new checkout', String(registeredWorkspaces[0]?.[0]).includes('.worktrees/wt-'), JSON.stringify(registeredWorkspaces[0]))
+
+  check('a session was opened in that workspace', started.length === 1, JSON.stringify(started))
+  const [wsId, options] = started[0] ?? []
+  check('opened the NEW workspace', String(wsId).includes('wt-'), String(wsId))
+  check('the migration prompt is sent for the user', String(options?.prompt ?? '').includes('.worktrees/wt-'), String(options?.prompt))
+  check('the prompt names the new path for teammates/subagents', /teammate|subagent|团队成员|子智能体/i.test(String(options?.prompt ?? '')), String(options?.prompt))
   check('the bar reports the new branch', /已切到|Moved to/.test(f.el.textContent), f.el.textContent)
 }
 

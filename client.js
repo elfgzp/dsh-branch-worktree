@@ -53,6 +53,9 @@ window.__ModuleLoader__.load({
         statusSwitch: 'New worktree',
         statusBusy: 'Creating worktree…',
         statusDone: 'Moved to',
+        migratePrompt: 'I moved this work into a new Git worktree at {path}. '
+          + 'Carry any uncommitted work over from the previous directory first, and tell the user if something could not be carried. '
+          + 'Any teammate or subagent you delegate from here must be pointed at {path}.',
         errorAlreadyWorktree: 'This session is already working inside a worktree.',
         errorSwitchUnavailable: 'A running session has to be open before it can be moved; reopen it and try again.',
       },
@@ -89,6 +92,9 @@ window.__ModuleLoader__.load({
         statusSwitch: '新建 worktree',
         statusBusy: '正在创建 worktree…',
         statusDone: '已切到',
+        migratePrompt: '我已经把工作切到新的 Git worktree：{path}。'
+          + '请先把原来目录里未提交的改动搬过来，有搬不过来的告诉用户。'
+          + '之后交给团队成员或子智能体的任务，工作目录都要指向 {path}。',
         errorAlreadyWorktree: '这个会话已经在 worktree 里了。',
         errorSwitchUnavailable: '会话必须处于运行状态才能原地切换目录，请先重新打开它。',
       },
@@ -359,18 +365,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Move a RUNNING session's working directory onto a new worktree.
+     * Create a worktree for a running session and register it as a Workspace.
      *
-     * Unlike `prepare`, this neither registers a Workspace nor opens a new
-     * session: the Host appends a durable working-directory change to the same
-     * conversation and queues the model a notice. That is why the user does not
-     * have to type anything to tell the model it moved.
+     * Renaming a session's directory in place was the obvious design and it does
+     * not work: DSH freezes `header.cwd` at session creation, every panel takes
+     * its root from that header, and workspace membership requires
+     * `cwd === workspace.path`. A workspace whose path IS the new checkout is
+     * therefore the only shape where the file tree, the Git view and the
+     * changes list actually follow the move.
      */
-    async function switchInPlace(cwd, sessionId) {
+    async function switchWorkspace(cwd) {
       const response = await fetch(new URL(`${PREFIX}/switch`, hostBase()), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd, sessionId }),
+        body: JSON.stringify({ cwd }),
       })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'switch-failed', '')
@@ -739,7 +747,7 @@ window.__ModuleLoader__.load({
      * @param services - late-bound client services resolved per interaction.
      * @returns the `shell.bottom` occupant component.
      */
-    function createStatusBar() {
+    function createStatusBar(services) {
       return function BranchWorktreeStatusBar(props) {
         const { t, useSessions, useWorkspaces } = props
         const workspaces = useWorkspaces((state) => state)
@@ -787,15 +795,22 @@ window.__ModuleLoader__.load({
         if (cwd === undefined || cwd === '' || repoState !== 'repo' || isWorktreePath(cwd)) return null
 
         const switchToWorktree = async () => {
-          if (busy || sessionId === undefined) return
+          if (busy) return
           setBusy(true)
           setFailure(null)
           setDone(null)
           try {
-            // Rebind THIS conversation. No new workspace appears in the
-            // sidebar and no prompt is typed on the user's behalf: the Host
-            // commits the directory change and queues the model a notice.
-            const result = await switchInPlace(cwd, sessionId)
+            const result = await switchWorkspace(cwd)
+            const uiWorkspace = services.uiWorkspace()
+            if (uiWorkspace === undefined) throw httpError(0, 'switch-failed', 'workspace service unavailable')
+            if (result.workspaceId === undefined) throw httpError(0, 'switch-failed', 'workspace unavailable')
+            // Opening the workspace is what carries the UI across: the session
+            // created inside it inherits the worktree as its cwd, so the file
+            // tree, Git view and changes list all land on the new directory.
+            uiWorkspace.startSession(result.workspaceId, {
+              prompt: t('migratePrompt').replaceAll('{path}', result.path),
+              clearPreviousDraft: true,
+            })
             setDone(result.branch)
           } catch (error) {
             setFailure(error.code ?? 'switch-failed')
@@ -833,7 +848,7 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ensureOrderCss()
         const Control = createControl({ uiWorkspace: () => ctx.get('uiWorkspace') })
-        const StatusBar = createStatusBar()
+        const StatusBar = createStatusBar({ uiWorkspace: () => ctx.get('uiWorkspace') })
         ctx.effect(() => ctx.locale.register(NS, 'en', DICTS.en), 'branch-worktree: dictionary (en)')
         ctx.effect(() => ctx.locale.register(NS, 'zh', DICTS.zh), 'branch-worktree: dictionary (zh)')
         ctx.effect(() => () => {
