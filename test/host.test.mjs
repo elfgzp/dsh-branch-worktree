@@ -189,6 +189,54 @@ const insideWt = await post('/branch-worktree/switch', { cwd: join(repo, '.workt
 check('refuses to nest a worktree of a worktree', insideWt.body.ok === false, JSON.stringify(insideWt.body))
 check('specific error code', insideWt.body.code === 'already-worktree', insideWt.body.code)
 
+console.log('\n[16] cleanup scan — only merged, clean worktrees are candidates')
+// Build two extra worktrees: one merged into master, one with unique commits.
+const mergeWt = await post('/branch-worktree/switch', { cwd: repo })
+const mergedBranch = mergeWt.body.branch
+const mergedPath = mergeWt.body.path
+git('merge', '--no-ff', mergedBranch, '-m', `merge ${mergedBranch}`)
+
+// A worktree whose branch has a commit the trunk does not have.
+const liveWt = await post('/branch-worktree/switch', { cwd: repo })
+await writeFile(join(liveWt.body.path, 'only-here.txt'), 'unique\n')
+execFileSync('git', ['add', '.'], { cwd: liveWt.body.path, encoding: 'utf8' })
+execFileSync('git', ['commit', '-q', '-m', 'unique work'], { cwd: liveWt.body.path, encoding: 'utf8' })
+
+const scan = await get(`/branch-worktree/cleanup?cwd=${encodeURIComponent(repo)}`)
+check('scan ok', scan.body.ok === true, JSON.stringify(scan.body).slice(0, 200))
+const byPath = new Map((scan.body.candidates ?? []).map((c) => [c.path, c]))
+const mergedEntry = byPath.get(mergedPath)
+const liveEntry = byPath.get(liveWt.body.path)
+check('merged worktree is a candidate', mergedEntry?.removable === true, JSON.stringify(mergedEntry))
+check('its verdict is "merged"', mergedEntry?.reason === 'merged', mergedEntry?.reason)
+// This is the whole safety property: work that is not in the trunk must never
+// be offered for deletion.
+check('unmerged worktree is NOT a candidate', liveEntry?.removable === false, JSON.stringify(liveEntry))
+check('its verdict is "unmerged"', liveEntry?.reason === 'unmerged', liveEntry?.reason)
+check('main checkout is never a candidate', (byPath.get(repoReal) ?? byPath.get(repo))?.removable !== true, JSON.stringify(byPath.get(repoReal)))
+
+console.log('\n[17] cleanup remove — refuses to destroy work, accepts a clean merge')
+const refused = await post('/branch-worktree/cleanup/remove', { cwd: repo, path: liveWt.body.path })
+check('refuses the unmerged worktree', refused.body.ok === false, JSON.stringify(refused.body))
+check('worktree still on disk', git('worktree', 'list', '--porcelain').includes(liveWt.body.path), 'gone!')
+
+// A dirty candidate must also be refused.
+await writeFile(join(mergedPath, 'scratch.txt'), 'uncommitted\n')
+const dirtyRefused = await post('/branch-worktree/cleanup/remove', { cwd: repo, path: mergedPath })
+check('refuses a dirty worktree', dirtyRefused.body.ok === false, JSON.stringify(dirtyRefused.body))
+check('still on disk after refusal', git('worktree', 'list', '--porcelain').includes(mergedPath), 'gone!')
+execFileSync('git', ['checkout', '--', '.'], { cwd: mergedPath, encoding: 'utf8' })
+await rm(join(mergedPath, 'scratch.txt'), { force: true })
+
+const removedOk = await post('/branch-worktree/cleanup/remove', { cwd: repo, path: mergedPath })
+check('removes the clean, merged worktree', removedOk.body.ok === true, JSON.stringify(removedOk.body))
+check('gone from worktree list', !git('worktree', 'list', '--porcelain').includes(mergedPath), git('worktree', 'list', '--porcelain'))
+check('branch deleted too', !git('branch', '--list', mergedBranch).includes(mergedBranch), git('branch', '--list'))
+
+console.log('\n[18] cleanup remove — a stale path is a clear error, not a crash')
+const gone = await post('/branch-worktree/cleanup/remove', { cwd: repo, path: mergedPath })
+check('reports not-found', gone.body.ok === false && gone.body.code === 'not-found', JSON.stringify(gone.body))
+
 server.close()
 await rm(repo, { recursive: true, force: true })
 await rm(plain, { recursive: true, force: true })

@@ -58,6 +58,25 @@ window.__ModuleLoader__.load({
           + 'Any teammate or subagent you delegate from here must be pointed at {path}.',
         errorAlreadyWorktree: 'This session is already working inside a worktree.',
         errorSwitchUnavailable: 'A running session has to be open before it can be moved; reopen it and try again.',
+        cleanupTitle: 'Worktree cleanup',
+        cleanupIntro: 'Worktrees whose branch is already merged into {trunk} and whose checkout is clean can be removed here. Removal deletes the directory and the branch.',
+        cleanupEmpty: 'Nothing to clean up right now.',
+        cleanupKept: 'Not removable',
+        cleanupRemove: 'Remove',
+        cleanupBusy: 'Removing…',
+        cleanupDone: 'Removed',
+        cleanupRefresh: 'Refresh',
+        cleanupLoading: 'Reading worktrees…',
+        cleanupNotRepo: 'The current workspace is not inside a Git repository.',
+        cleanupNoWorkspace: 'Open a workspace first.',
+        cleanupReasonMerged: 'merged into the trunk',
+        cleanupReasonUnmerged: 'branch is not merged yet',
+        cleanupReasonDirty: 'uncommitted changes',
+        cleanupReasonDetached: 'detached checkout',
+        cleanupReasonMain: 'main checkout',
+        cleanupReasonTrunk: 'this is the trunk itself',
+        cleanupReasonUnmergedCommits: 'has commits the trunk does not have',
+        cleanupReasonUnknown: 'not eligible',
       },
       zh: {
         chip: '分支',
@@ -97,6 +116,25 @@ window.__ModuleLoader__.load({
           + '之后交给团队成员或子智能体的任务，工作目录都要指向 {path}。',
         errorAlreadyWorktree: '这个会话已经在 worktree 里了。',
         errorSwitchUnavailable: '会话必须处于运行状态才能原地切换目录，请先重新打开它。',
+        cleanupTitle: '清理 worktree',
+        cleanupIntro: '分支已经合入 {trunk}、且检出目录没有未提交改动时，可以在这里删掉对应的 worktree。删除会同时移除目录和分支。',
+        cleanupEmpty: '目前没有需要清理的 worktree。',
+        cleanupKept: '不可清理',
+        cleanupRemove: '清理',
+        cleanupBusy: '正在删除…',
+        cleanupDone: '已清理',
+        cleanupRefresh: '刷新',
+        cleanupLoading: '正在读取 worktree…',
+        cleanupNotRepo: '当前工作区不在 Git 仓库内。',
+        cleanupNoWorkspace: '请先打开一个工作区。',
+        cleanupReasonMerged: '已合入主干',
+        cleanupReasonUnmerged: '分支尚未合并',
+        cleanupReasonDirty: '有未提交改动',
+        cleanupReasonDetached: '游离检出',
+        cleanupReasonMain: '主工作区',
+        cleanupReasonTrunk: '本身就是主干',
+        cleanupReasonUnmergedCommits: '还有主干没有的提交',
+        cleanupReasonUnknown: '不满足清理条件',
       },
     }
 
@@ -112,6 +150,18 @@ window.__ModuleLoader__.load({
       'git-failed': 'errorGit',
       'already-worktree': 'errorAlreadyWorktree',
       'switch-unavailable': 'errorSwitchUnavailable',
+      'not-found': 'cleanupReasonUnknown',
+    }
+
+    /** Host cleanup verdict → dictionary key explaining it. */
+    const CLEANUP_REASON_KEY = {
+      merged: 'cleanupReasonMerged',
+      unmerged: 'cleanupReasonUnmerged',
+      dirty: 'cleanupReasonDirty',
+      detached: 'cleanupReasonDetached',
+      'main-checkout': 'cleanupReasonMain',
+      'on-trunk': 'cleanupReasonTrunk',
+      'unmerged-commits': 'cleanupReasonUnmergedCommits',
     }
 
     /** Styling that mirrors the shipped workspace and preset chips. */
@@ -243,6 +293,43 @@ window.__ModuleLoader__.load({
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
+      },
+      /** Settings page layout. */
+      section: { display: 'grid', gap: 10, padding: '4px 0', minWidth: 0 },
+      cleanupList: { display: 'grid', gap: 6, minWidth: 0 },
+      cleanupRow: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 10,
+        minWidth: 0,
+        padding: '6px 8px',
+        borderRadius: 7,
+        background: 'var(--dsw-alias-bg-layer-2)',
+      },
+      cleanupMain: { display: 'grid', gap: 2, minWidth: 0, flex: '1 1 auto' },
+      cleanupBranch: {
+        fontFamily: 'var(--dsw-alias-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
+        fontSize: 12,
+        lineHeight: '17px',
+        color: 'var(--dsw-alias-label-primary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
+      cleanupPath: {
+        fontSize: 10,
+        lineHeight: '14px',
+        color: 'var(--dsw-alias-label-secondary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      },
+      cleanupWhy: {
+        flex: 'none',
+        fontSize: 11,
+        lineHeight: '16px',
+        color: 'var(--dsw-alias-label-secondary)',
       },
       /** The thin full-width bar at the very bottom of the window. */
       statusBar: {
@@ -843,6 +930,149 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Read every worktree of a repository with its cleanup verdict. */
+    async function scanCleanup(cwd) {
+      const url = new URL(`${PREFIX}/cleanup`, hostBase())
+      url.searchParams.set('cwd', cwd)
+      const response = await fetch(url, { headers: { accept: 'application/json' } })
+      const payload = await response.json().catch(() => undefined)
+      if (payload === undefined) throw httpError(response.status, 'cleanup-failed', '')
+      if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
+      return payload
+    }
+
+    /** Remove one worktree and its branch. */
+    async function removeCleanup(cwd, path, deleteBranch) {
+      const response = await fetch(new URL(`${PREFIX}/cleanup/remove`, hostBase()), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cwd, path, deleteBranch }),
+      })
+      const payload = await response.json().catch(() => undefined)
+      if (payload === undefined) throw httpError(response.status, 'cleanup-failed', '')
+      if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
+      return payload
+    }
+
+    /**
+     * Build the settings page that cleans up finished worktrees.
+     *
+     * It lists every linked worktree of the current workspace's repository with
+     * the verdict the Host computed, and only offers deletion for the ones whose
+     * branch is already in the trunk and whose checkout is clean. The Host
+     * re-checks both conditions on removal, so a stale page cannot destroy new
+     * work.
+     *
+     * @param services - late-bound client services resolved per interaction.
+     * @returns the `settings.section` occupant component.
+     */
+    function createCleanupSection(services) {
+      return function BranchWorktreeCleanup(props) {
+        const { t, useWorkspaces, useSessions } = props
+        const workspaces = useWorkspaces((state) => state)
+        const sessions = useSessions((state) => state)
+
+        const [scan, setScan] = React.useState({ phase: 'idle' })
+        const [busy, setBusy] = React.useState('')
+        const [failure, setFailure] = React.useState(null)
+        const [done, setDone] = React.useState(null)
+
+        // The settings page is not bound to a Session, so the repository has to
+        // come from the selected workspace. That is the workspace the user is
+        // looking at, which is the one whose worktrees they mean.
+        const cwd = React.useMemo(() => {
+          const sessionId = currentSessionId()
+          if (sessionId !== undefined && sessions.byId?.[sessionId]?.cwd !== undefined) {
+            return sessions.byId[sessionId].cwd
+          }
+          if (workspaces.phase === 'ready' && workspaces.items.length > 0) return workspaces.items[0].path
+          return undefined
+        }, [sessions, workspaces])
+
+        const refresh = React.useCallback(async () => {
+          if (cwd === undefined) {
+            setScan({ phase: 'idle' })
+            return
+          }
+          setScan({ phase: 'loading' })
+          try {
+            const payload = await scanCleanup(cwd)
+            setScan({ phase: 'ready', payload })
+          } catch (error) {
+            setScan({ phase: 'unavailable', code: error.code ?? 'cleanup-failed' })
+          }
+        }, [cwd])
+
+        React.useEffect(() => { void refresh() }, [refresh])
+
+        const remove = async (candidate) => {
+          if (busy !== '') return
+          setBusy(candidate.path)
+          setFailure(null)
+          setDone(null)
+          try {
+            await removeCleanup(cwd, candidate.path, true)
+            setDone(candidate.branch)
+            await refresh()
+          } catch (error) {
+            setFailure(error.code ?? 'cleanup-failed')
+          } finally {
+            setBusy('')
+          }
+        }
+
+        if (cwd === undefined) {
+          return h('div', { style: S.section }, h('p', { style: S.hint }, t('cleanupNoWorkspace')))
+        }
+        if (scan.phase === 'loading' || scan.phase === 'idle') {
+          return h('div', { style: S.section }, h('p', { style: S.hint }, t('cleanupLoading')))
+        }
+        if (scan.phase === 'unavailable') {
+          return h('div', { style: S.section }, h('p', { style: S.hint }, t('cleanupNotRepo')))
+        }
+
+        const candidates = Array.isArray(scan.payload?.candidates) ? scan.payload.candidates : []
+        const removable = candidates.filter((entry) => entry.removable === true)
+        const kept = candidates.filter((entry) => entry.removable !== true)
+
+        const row = (entry, index) => h('div', { key: entry.path ?? index, style: S.cleanupRow }, [
+          h('div', { key: 'main', style: S.cleanupMain }, [
+            h('code', { key: 'branch', style: S.cleanupBranch }, entry.branch === '' ? '—' : entry.branch),
+            h('span', { key: 'path', style: S.cleanupPath, title: entry.path }, shortPath(entry.path)),
+          ]),
+          entry.removable === true
+            ? h(Button, {
+              key: 'rm',
+              variant: 'ghost',
+              disabled: busy !== '',
+              onClick: () => { void remove(entry) },
+            }, busy === entry.path ? t('cleanupBusy') : t('cleanupRemove'))
+            : h('span', { key: 'why', style: S.cleanupWhy }, t(CLEANUP_REASON_KEY[entry.reason] ?? 'cleanupReasonUnknown')),
+        ])
+
+        const failureText = failure === null ? null : t(ERROR_KEY[failure] ?? 'errorUnknown')
+
+        return h('div', { style: S.section }, [
+          h('p', { key: 'intro', style: S.hint }, t('cleanupIntro').replaceAll('{trunk}', String(scan.payload?.trunk ?? 'main'))),
+          removable.length === 0
+            ? h('p', { key: 'empty', style: S.hint }, t('cleanupEmpty'))
+            : h('div', { key: 'list', style: S.cleanupList }, removable.map(row)),
+          kept.length === 0 ? null : h('div', { key: 'kept', style: S.cleanupList }, [
+            h('p', { key: 'label', style: S.fieldLabel }, t('cleanupKept')),
+            ...kept.map(row),
+          ]),
+          failureText === null ? null : h('p', { key: 'err', style: S.error }, failureText),
+          done === null ? null : h('p', { key: 'done', style: S.hint }, `${t('cleanupDone')} ${done}`),
+          h('div', { key: 'actions', style: S.footer }, h(Button, {
+            key: 'refresh',
+            variant: 'ghost',
+            disabled: busy !== '',
+            onClick: () => { void refresh() },
+          }, t('cleanupRefresh'))),
+        ])
+      }
+    }
+
     return {
       inject: ['slots', 'locale', 'uiWorkspace'],
       apply(ctx) {
@@ -868,6 +1098,19 @@ window.__ModuleLoader__.load({
           name: 'shell.bottom',
           locale: NS,
         }, StatusBar))
+        // Worktree cleanup lives in Settings: it is a repository-wide housekeeping
+        // task, not something tied to one conversation.
+        const Cleanup = createCleanupSection({})
+        ctx.slots.inject('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: 'branch-worktree-cleanup',
+          order: 50,
+          // `label` names the page in the settings navigation; it must be the
+          // translated string, and `t` is only available inside the occupant,
+          // so the dictionary is read through the locale service directly.
+          label: () => ctx.locale.bind(NS)('cleanupTitle'),
+          locale: NS,
+        }, Cleanup))
       },
     }
   },

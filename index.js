@@ -449,6 +449,151 @@ async function checkoutInPlace(status, branch) {
   return { path: status.repositoryRoot, branch, created: !branchExists, reusedWorktree: false }
 }
 
+/**
+ * Decide whether one linked worktree is safe to clean up.
+ *
+ * The rule is deliberately conservative, because every branch of it deletes a
+ * directory that may hold someone's work:
+ *
+ *   - the main checkout is never a candidate;
+ *   - a detached checkout has no branch to reason about, so it is skipped;
+ *   - the branch must be an ancestor of the trunk (`main`/`master`/whatever
+ *     `origin/HEAD` points at), i.e. its commits are already in the trunk;
+ *   - the checkout itself must be clean — uncommitted or untracked files are
+ *     work that merging the branch does NOT preserve.
+ *
+ * Nothing here reads the merge-request platform, so "merged into the trunk" is
+ * the whole criterion. That is honest: it cannot distinguish a branch that was
+ * merged through a request from one merged locally.
+ *
+ * @param {object} status - repository status from {@link inspectRepository}.
+ * @param {object} worktree - one entry of `status.worktrees`.
+ * @returns {Promise<object>} the candidate with its verdict.
+ */
+async function evaluateWorktree(status, worktree) {
+  const base = {
+    path: worktree.path,
+    branch: worktree.branch,
+    dirty: false,
+    unmergedCommits: 0,
+    reason: '',
+    removable: false,
+  }
+  if (await isSamePath(worktree.path, status.repositoryRoot)) {
+    return { ...base, reason: 'main-checkout' }
+  }
+  if (worktree.branch === '' || worktree.branch.startsWith('(')) {
+    return { ...base, reason: 'detached' }
+  }
+
+  const trunk = status.baseBranch
+  if (worktree.branch === trunk) {
+    return { ...base, reason: 'on-trunk' }
+  }
+
+  const merged = await git(status.repositoryRoot, ['merge-base', '--is-ancestor', worktree.branch, trunk])
+  // A non-zero exit means "not an ancestor", which is the common case and not
+  // an error; only an unexpected code would be, and treating it as "not merged"
+  // is the safe reading.
+  if (merged.code !== 0) {
+    return { ...base, reason: 'unmerged' }
+  }
+
+  const behind = await git(status.repositoryRoot, ['rev-list', '--count', `${trunk}..${worktree.branch}`])
+  const unmergedCommits = Number.parseInt(behind.stdout.trim(), 10) || 0
+  const dirtyOutput = await git(worktree.path, ['status', '--porcelain'])
+  const dirty = dirtyOutput.stdout.trim() !== ''
+
+  return {
+    ...base,
+    dirty,
+    unmergedCommits,
+    reason: dirty ? 'dirty' : unmergedCommits > 0 ? 'unmerged-commits' : 'merged',
+    removable: !dirty && unmergedCommits === 0,
+  }
+}
+
+/**
+ * List every linked worktree with a verdict on whether it can be cleaned up.
+ * @param {string} cwd - any directory inside the repository.
+ * @returns {Promise<object>} the candidates and the trunk they were compared to.
+ */
+async function listCleanupCandidates(cwd) {
+  const status = await inspectRepository(cwd)
+  if (status.isRepo !== true) {
+    throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
+  }
+  const candidates = []
+  for (const worktree of status.worktrees) {
+    candidates.push(await evaluateWorktree(status, worktree))
+  }
+  return {
+    repositoryRoot: status.repositoryRoot,
+    trunk: status.baseBranch,
+    candidates,
+  }
+}
+
+/**
+ * Remove one worktree and the branch it held, but only after re-checking it.
+ *
+ * The checks are repeated here rather than trusted from the listing: the list a
+ * user is looking at may be minutes old, and the tree may have been edited
+ * since. A removal that a stale snapshot allowed would destroy work.
+ *
+ * @param {string} cwd - any directory inside the repository.
+ * @param {string} target - the worktree path to remove.
+ * @param {boolean} deleteBranch - also delete the branch it had checked out.
+ * @returns {Promise<object>} what was removed.
+ */
+async function removeWorktree(cwd, target, deleteBranch) {
+  const status = await inspectRepository(cwd)
+  if (status.isRepo !== true) {
+    throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
+  }
+  if (typeof target !== 'string' || target === '') {
+    throw new BranchWorktreeError('bad-request', 'a worktree path is required')
+  }
+  const worktree = status.worktrees.find((entry) => entry.path === target)
+  if (worktree === undefined) {
+    throw new BranchWorktreeError('not-found', 'that path is not a worktree of this repository')
+  }
+
+  const verdict = await evaluateWorktree(status, worktree)
+  if (!verdict.removable) {
+    throw new BranchWorktreeError(
+      `not-removable-${verdict.reason}`,
+      verdict.reason === 'dirty'
+        ? 'that worktree has uncommitted changes; commit or discard them before cleaning up'
+        : verdict.reason === 'unmerged'
+          ? 'that branch is not merged into the trunk yet'
+          : verdict.reason === 'unmerged-commits'
+            ? 'that worktree still has commits the trunk does not have'
+            : `that worktree is not a cleanup candidate (${verdict.reason})`,
+    )
+  }
+
+  const removed = await git(status.repositoryRoot, ['worktree', 'remove', worktree.path])
+  if (removed.code !== 0) {
+    throw new BranchWorktreeError('git-failed', removed.stderr.trim().split('\n').slice(-3).join(' ') || 'git worktree remove failed')
+  }
+
+  let branchDeleted = false
+  if (deleteBranch && worktree.branch !== '') {
+    // `-d` refuses when the branch is not merged, which is exactly the guard we
+    // want: the verdict above already proved it is, so a refusal here means the
+    // repository changed underneath us.
+    const deleted = await git(status.repositoryRoot, ['branch', '-d', worktree.branch])
+    branchDeleted = deleted.code === 0
+  }
+
+  return {
+    path: worktree.path,
+    branch: worktree.branch,
+    branchDeleted,
+  }
+}
+
 /** Write one JSON response. */
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload)
@@ -722,4 +867,71 @@ export function apply(ctx) {
       }
     },
   }), 'branch-worktree: switch route')
+
+  // Read-only scan for the settings page: every linked worktree, with the
+  // reason it can or cannot be cleaned up.
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: `${PREFIX}/cleanup`,
+    async handler(req, res) {
+      if (rejected(req, res)) return
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { code: 'bad-request', message: 'GET required' })
+        return
+      }
+      const url = new URL(req.url ?? '/', 'http://dsh.invalid')
+      try {
+        sendJson(res, 200, { ok: true, ...(await listCleanupCandidates(url.searchParams.get('cwd') ?? '')) })
+      } catch (error) {
+        const known = error instanceof BranchWorktreeError
+        sendJson(res, known ? 400 : 500, {
+          ok: false,
+          code: known ? error.code : 'cleanup-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+  }), 'branch-worktree: cleanup scan route')
+
+  // The destructive half. Every precondition is re-checked against the live
+  // repository, so a stale list in the browser cannot delete new work.
+  ctx.effect(() => webServer.register({
+    kind: 'exact',
+    path: `${PREFIX}/cleanup/remove`,
+    async handler(req, res) {
+      if (rejected(req, res)) return
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { code: 'bad-request', message: 'POST required' })
+        return
+      }
+      const essence = String(req.headers['content-type'] ?? '').split(';', 1)[0]?.trim().toLowerCase()
+      if (essence !== 'application/json') {
+        sendJson(res, 415, { code: 'bad-request', message: 'content-type must be application/json' })
+        return
+      }
+      let body
+      try {
+        body = JSON.parse(await readBody(req))
+      } catch {
+        sendJson(res, 400, { code: 'bad-request', message: 'request body must be JSON' })
+        return
+      }
+      if (typeof body !== 'object' || body === null) {
+        sendJson(res, 400, { code: 'bad-request', message: 'request body must be an object' })
+        return
+      }
+      try {
+        const removed = await removeWorktree(body.cwd, body.path, body.deleteBranch !== false)
+        sendJson(res, 200, { ok: true, ...removed })
+      } catch (error) {
+        const known = error instanceof BranchWorktreeError
+        ctx.logger.warn?.(`branch-worktree: cleanup failed: ${error instanceof Error ? error.message : String(error)}`)
+        sendJson(res, known ? 400 : 500, {
+          ok: false,
+          code: known ? error.code : 'cleanup-failed',
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+  }), 'branch-worktree: cleanup remove route')
 }

@@ -167,6 +167,31 @@ git worktree remove .worktrees/feature-login
 git branch -d feature/login
 ```
 
+### Cleaning up finished worktrees
+
+**Settings → Worktree cleanup** lists every linked worktree of the current
+workspace's repository and offers to remove the ones that are finished.
+
+A worktree is removable only when **all** of these hold, and the Host re-checks
+them at the moment of deletion (so a page left open for an hour cannot delete
+work that appeared since):
+
+- it is not the main checkout;
+- it has a branch checked out (not a detached head);
+- that branch is already an ancestor of the trunk — i.e. its commits are in
+  `main`/`master`;
+- the checkout is clean (nothing uncommitted or untracked).
+
+Anything else is listed under **Not removable** with the reason, and its
+directory is left alone. Removing deletes the worktree directory and, with
+`git branch -d`, the branch.
+
+Note the honest limitation: this reads **local Git only**. It cannot tell you
+whether the branch went through a merge request or whether that request chose
+"delete source branch" — it only knows the commits are in the trunk. A branch
+merged locally without a request is treated the same as one merged through a
+request.
+
 ## Errors you may see
 
 | Message | Meaning |

@@ -100,7 +100,7 @@ const registeredWorkspaces = []
 const plugin = {
   get: (n) => n === 'uiWorkspace' ? { startSession: (...a) => started.push(a) } : undefined,
   effect: (fn) => (typeof fn === 'function' ? fn() : undefined),
-  locale: { register: () => () => {} },
+  locale: { register: () => () => {}, bind: () => (k) => k },
   slots: { inject: (key, fn) => fn(), register: (opts, C) => { registered[opts.name] = C; return () => {} } },
 }
 // re-run apply with the stub context
@@ -289,6 +289,41 @@ console.log('\n[3] status bar — clicking opens a session in the new worktree w
   check('the migration prompt is sent for the user', String(options?.prompt ?? '').includes('.worktrees/wt-'), String(options?.prompt))
   check('the prompt names the new path for teammates/subagents', /teammate|subagent|团队成员|子智能体/i.test(String(options?.prompt ?? '')), String(options?.prompt))
   check('the bar reports the new branch', /已切到|Moved to/.test(f.el.textContent), f.el.textContent)
+}
+
+console.log('\n[4] settings cleanup page — lists worktrees and only offers real candidates')
+{
+  // Two worktrees: one merged into master, one with its own commit.
+  const merged = await fetch(`${globalThis.location.origin}/branch-worktree/switch`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: repoDir }),
+  }).then((r) => r.json())
+  git('merge', '--no-ff', merged.branch, '-m', `merge ${merged.branch}`)
+  const working = await fetch(`${globalThis.location.origin}/branch-worktree/switch`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: repoDir }),
+  }).then((r) => r.json())
+  await writeFile(join(working.path, 'wip.txt'), 'wip\n')
+  execFileSync('git', ['add', '.'], { cwd: working.path, encoding: 'utf8' })
+  execFileSync('git', ['commit', '-q', '-m', 'wip'], { cwd: working.path, encoding: 'utf8' })
+
+  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 'sc' }))
+  const st = {
+    sessions: { sc: { cwd: repoDir } },
+    workspaces: [{ workspaceId: 'wc', path: repoDir, sessionIds: ['sc'] }],
+  }
+  // Wait for the scan to finish: while it runs the page says "正在读取".
+  const g = await mount('settings.section', {
+    ...st,
+    until: (el) => el.textContent.trim() !== '' && !/正在读取|Reading worktrees/.test(el.textContent),
+  })
+  const text = g.el.textContent
+  check('page renders', text.trim() !== '', text.slice(0, 120))
+  // The merged branch must be offered; the one with unique commits must not be.
+  const rows = [...g.el.querySelectorAll('button')].map((b) => b.textContent.trim())
+  check('offers a remove action for the merged worktree', rows.some((r) => /清理|Remove/.test(r)), JSON.stringify(rows))
+  check('shows the merged branch', text.includes(merged.branch), text.slice(0, 300))
+  // The unmerged one appears in the "not removable" group with its reason.
+  check('lists the unmerged worktree as kept', text.includes(working.branch), text.slice(0, 300))
+  check('explains why it is kept', /尚未合并|not merged/.test(text), text.slice(0, 300))
 }
 
 server.close()
