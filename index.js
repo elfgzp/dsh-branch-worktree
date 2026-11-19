@@ -634,9 +634,16 @@ export function apply(ctx) {
   const webServer = ctx.get('webServer')
   const connection = ctx.get('connection')
   const workspaceRegistry = ctx.get('workspaceRegistry')
-  // Not used by the switch any more: moving a session's directory in place
-  // cannot move the UI (see the /switch route for why). Kept out of the file so
-  // there is nothing misleading to reach for later.
+  // The in-place switch needs both of these. `workingDirectory` owns the
+  // session's REAL directory — it is exposed as the `working-directory`
+  // projection — and `agents` maps a session id to the live agent that owns it.
+  //
+  // Read carefully what this does and does not fix: DSH's own panels (file tree,
+  // Git view, changes) root themselves on the frozen `header.cwd`, so they keep
+  // showing the original directory. What changes is where the agent actually
+  // works, which is what the model reasons about.
+  const workingDirectory = ctx.get('workingDirectory')
+  const agents = ctx.get('agents')
   if (webServer === undefined || connection === undefined || workspaceRegistry === undefined) {
     throw new Error('branch-worktree: the web composition (webServer, connection, workspaceRegistry) is required')
   }
@@ -786,25 +793,31 @@ export function apply(ctx) {
     },
   }), 'branch-worktree: create route')
 
-  // Switch a running Session into a fresh worktree, workspace included.
+  // Move a running Session onto a fresh worktree, in place.
   //
-  // The obvious "just move the session's cwd" design does not work in DSH, and
-  // the reason is structural rather than incidental:
+  // This is deliberately NOT "create a workspace and open a session there". The
+  // user picks a workspace (say `itfs`), asks for a worktree, and expects to
+  // keep working in `itfs` — one sidebar group, one conversation, just at a
+  // different directory.
   //
-  //   - `SessionHeader` is deep-frozen at creation; nothing can rewrite
-  //     `header.cwd` (`dsh-session`: "Detached, deep-frozen creation metadata").
-  //   - Every panel takes its root from that header — the file tree, the Git
-  //     view and the changes list all read
-  //     `useSessions(s => s.byId[sessionId]?.cwd)` — so a session whose working
-  //     directory is changed at the agent level keeps showing the OLD directory
-  //     in every panel (`dsh-working-directory` only appends an event).
-  //   - A Session's workspace membership is `cwd === workspace.path`, and a
-  //     workspace's path is fixed when it is created.
+  // What DSH allows and what it does not, verified in its source:
   //
-  // So the only arrangement where the UI actually follows is a Workspace whose
-  // path IS the new checkout, with a Session created in it. This route does
-  // both halves; the client then opens that workspace. The user still gets one
-  // click and one new conversation, and every panel points at the worktree.
+  //   - `workingDirectory.set(agent, path)` changes the Session's real working
+  //     directory. It is the same mechanism the shipped `create_worktree` tool
+  //     uses, it appends a durable `working-directory/change` record, and it
+  //     queues the model a notice about the new path.
+  //   - That directory is exposed as the `working-directory` projection, which
+  //     is readable (and is what the agent actually works in).
+  //   - `SessionHeader.cwd`, however, is deep-frozen at creation ("Detached,
+  //     deep-frozen creation metadata"), and DSH's own file tree / Git view /
+  //     changes panel root themselves on that header. Those panels therefore
+  //     keep showing the ORIGINAL directory after the move.
+  //   - Workspace membership requires `cwd === workspace.path`, and a workspace's
+  //     path is fixed at creation, so the session stays in its original group.
+  //
+  // In short: the session stays where the user put it and the agent moves; the
+  // built-in sidebar panels do not follow. That limitation is surfaced in the
+  // status bar rather than papered over.
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: `${PREFIX}/switch`,
@@ -831,6 +844,22 @@ export function apply(ctx) {
         return
       }
       try {
+        if (workingDirectory === undefined || agents === undefined) {
+          throw new BranchWorktreeError(
+            'switch-unavailable',
+            'this composition cannot move a running session between directories (workingDirectory is not installed)',
+          )
+        }
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+        if (sessionId === '') throw new BranchWorktreeError('bad-request', 'sessionId is required')
+        const agent = agents.get(sessionId)
+        if (agent === undefined) {
+          throw new BranchWorktreeError(
+            'switch-unavailable',
+            'that session is not running, so its directory cannot be changed; open it first',
+          )
+        }
+
         const status = await inspectRepository(body.cwd)
         if (status.isRepo !== true) {
           throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
@@ -843,18 +872,18 @@ export function apply(ctx) {
         const branch = validateBranch(await generateBranchName(status))
         const checkout = await ensureWorktree(status, branch, status.baseBranch)
 
-        // Registering the checkout is what makes the panels follow: a Workspace
-        // whose path is the new directory is the only shape DSH accepts, and a
-        // Session created in it inherits that path as its frozen header cwd.
-        const workspaceId = (await workspaceRegistry.create(checkout.path, branch)).id
+        // Move the SAME session onto the checkout. No workspace is created and
+        // no second conversation appears: the session keeps its workspace
+        // membership, and its real directory (the `working-directory`
+        // projection) now points at the worktree.
+        const moved = await workingDirectory.set(agent, checkout.path)
 
         sendJson(res, 200, {
           ok: true,
-          path: checkout.path,
+          path: moved,
           branch: checkout.branch,
           branchCreated: checkout.created,
           repositoryRoot: status.repositoryRoot,
-          workspaceId,
         })
       } catch (error) {
         const known = error instanceof BranchWorktreeError

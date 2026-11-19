@@ -116,16 +116,19 @@ is running there is a second entry point: a thin **status bar across the bottom
 of the window** shows the current working directory, and — while that directory
 is a Git repository that is not already a worktree — a **New worktree** button.
 
-One click creates a `wt/…` worktree, registers it as a Workspace, and opens a
-session there, so the file tree, the Git view and the changes list all point at
-the new checkout. A prompt is sent telling the model to carry over uncommitted
-work and to point any teammate or subagent at the new path.
+One click creates a `wt/…` worktree and moves **this conversation** onto it. No
+second workspace appears in the sidebar and no second chat is opened: the Host
+changes the running session's directory, which also queues the model a notice
+naming the new path (so uncommitted work and delegated teammates can be pointed
+there without you typing anything).
 
-**Why a workspace, rather than just moving the session?** DSH freezes a
-session's `cwd` in its header at creation, and every panel roots itself on that
-header — moving only the agent's working directory leaves the whole right-hand
-side showing the old path. A workspace whose path *is* the checkout is the only
-shape where the UI actually follows.
+**What follows and what does not.** The agent really works in the new directory
+— that is DSH's `working-directory` projection. But DSH freezes a session's
+`header.cwd` when the session is created, and its own file tree, Git view and
+changes panel read that header. Those panels therefore keep showing the original
+workspace directory, and the session stays in the sidebar group it started in.
+The status bar says so explicitly once a move has happened, rather than letting
+the mismatch look like a bug.
 
 The bar hides itself once the directory is inside `.worktrees/`.
 

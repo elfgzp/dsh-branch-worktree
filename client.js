@@ -53,6 +53,8 @@ window.__ModuleLoader__.load({
         statusSwitch: 'New worktree',
         statusBusy: 'Creating worktree…',
         statusDone: 'Moved to',
+        statusMovedTag: 'agent here',
+        statusSidebarHint: 'The agent now works in this directory. The sidebar and the file panel still show the workspace it belongs to, because DSH fixes a session\'s directory when it is created.',
         migratePrompt: 'I moved this work into a new Git worktree at {path}. '
           + 'Carry any uncommitted work over from the previous directory first, and tell the user if something could not be carried. '
           + 'Any teammate or subagent you delegate from here must be pointed at {path}.',
@@ -111,6 +113,8 @@ window.__ModuleLoader__.load({
         statusSwitch: '新建 worktree',
         statusBusy: '正在创建 worktree…',
         statusDone: '已切到',
+        statusMovedTag: 'agent 在此',
+        statusSidebarHint: 'agent 现在在这个目录里工作。侧边栏和文件面板仍显示该会话所属的工作区，因为 DSH 在会话创建时就固定了它的目录。',
         migratePrompt: '我已经把工作切到新的 Git worktree：{path}。'
           + '请先把原来目录里未提交的改动搬过来，有搬不过来的告诉用户。'
           + '之后交给团队成员或子智能体的任务，工作目录都要指向 {path}。',
@@ -347,6 +351,17 @@ window.__ModuleLoader__.load({
       },
       statusLeft: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: '1 1 auto' },
       statusRight: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
+      /** Marks that the displayed directory is the agent's, not the session's. */
+      statusNote: {
+        flex: 'none',
+        padding: '0 6px',
+        borderRadius: 5,
+        background: 'var(--dsw-alias-bg-layer-3)',
+        color: 'var(--dsw-alias-label-secondary)',
+        fontSize: 10,
+        lineHeight: '15px',
+        cursor: 'help',
+      },
       /**
        * Long paths must stay readable from the end (the tail identifies the
        * checkout, the prefix is shared). `direction: rtl` would do that but also
@@ -461,11 +476,11 @@ window.__ModuleLoader__.load({
      * therefore the only shape where the file tree, the Git view and the
      * changes list actually follow the move.
      */
-    async function switchWorkspace(cwd) {
+    async function switchWorkspace(cwd, sessionId) {
       const response = await fetch(new URL(`${PREFIX}/switch`, hostBase()), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({ cwd, sessionId }),
       })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'switch-failed', '')
@@ -843,9 +858,8 @@ window.__ModuleLoader__.load({
         const [busy, setBusy] = React.useState(false)
         const [failure, setFailure] = React.useState(null)
         const [done, setDone] = React.useState(null)
-
-        // Re-read on every render: the key is written by the workspace domain
-        // outside React, and the cost is one JSON parse.
+        /** The directory the agent now works in, once a switch has succeeded. */
+        const [moved, setMoved] = React.useState(null)
         const sessionId = currentSessionId()
         const cwd = sessionId === undefined ? undefined : sessions.byId?.[sessionId]?.cwd
 
@@ -882,23 +896,18 @@ window.__ModuleLoader__.load({
         if (cwd === undefined || cwd === '' || repoState !== 'repo' || isWorktreePath(cwd)) return null
 
         const switchToWorktree = async () => {
-          if (busy) return
+          if (busy || sessionId === undefined) return
           setBusy(true)
           setFailure(null)
           setDone(null)
           try {
-            const result = await switchWorkspace(cwd)
-            const uiWorkspace = services.uiWorkspace()
-            if (uiWorkspace === undefined) throw httpError(0, 'switch-failed', 'workspace service unavailable')
-            if (result.workspaceId === undefined) throw httpError(0, 'switch-failed', 'workspace unavailable')
-            // Opening the workspace is what carries the UI across: the session
-            // created inside it inherits the worktree as its cwd, so the file
-            // tree, Git view and changes list all land on the new directory.
-            uiWorkspace.startSession(result.workspaceId, {
-              prompt: t('migratePrompt').replaceAll('{path}', result.path),
-              clearPreviousDraft: true,
-            })
+            // Move THIS conversation. No workspace is created and no second
+            // session appears: the Host changes the running session's real
+            // directory and queues the model a notice, so the same sidebar
+            // group and the same chat stay in use.
+            const result = await switchWorkspace(cwd, sessionId)
             setDone(result.branch)
+            setMoved(result.path)
           } catch (error) {
             setFailure(error.code ?? 'switch-failed')
           } finally {
@@ -915,7 +924,11 @@ window.__ModuleLoader__.load({
 
         return h('div', { style: S.statusBar, 'data-bw-status': 'ready' }, [
           h('div', { key: 'left', style: S.statusLeft }, [
-            h('span', { key: 'cwd', style: S.statusPath, title: cwd }, shortPath(cwd)),
+            // After a switch, show the directory the AGENT is in, which is the
+            // worktree — the session's own `cwd` stays pointing at the original
+            // workspace by design.
+            h('span', { key: 'cwd', style: S.statusPath, title: moved ?? cwd }, shortPath(moved ?? cwd)),
+            moved === null ? null : h('span', { key: 'note', style: S.statusNote, title: t('statusSidebarHint') }, t('statusMovedTag')),
           ]),
           h('div', { key: 'right', style: S.statusRight }, [
             failureText === null ? null : h('span', { key: 'err', style: S.error }, failureText),

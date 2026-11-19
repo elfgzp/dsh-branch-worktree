@@ -169,35 +169,40 @@ check('specific error code', c6.body.code === 'branch-is-main-checkout', c6.body
 console.log('\n[13] pool still excluded from git status after all of that')
 check('status shows only the edited file', git('status', '--porcelain').trim() === 'M README.md', JSON.stringify(git('status', '--porcelain')))
 
-console.log('\n[14] switch — the checkout is registered so the panels can follow')
+console.log('\n[14] switch — moves THIS session onto a worktree, no new workspace')
 const beforeWorkspaces = workspaceCreates.length
-const sw = await post('/branch-worktree/switch', { cwd: repo })
+LIVE.add('sess-live')
+const beforeRebinds = rebinds.length
+const sw = await post('/branch-worktree/switch', { cwd: repo, sessionId: 'sess-live' })
 check('switch ok', sw.body.ok === true, JSON.stringify(sw.body))
 check('moved onto a worktree', String(sw.body.path).includes('.worktrees/wt-'), sw.body.path)
-// This is the whole point: DSH freezes header.cwd and derives every panel root
-// from it, so the checkout MUST become a Workspace. Without this the file tree
-// and Git view keep showing the old directory.
-check('a workspace was registered for the new checkout', sw.body.workspaceId !== undefined, String(sw.body.workspaceId))
-check('the workspace path is the new checkout', String(sw.body.workspaceId).includes(String(sw.body.branch).replace('wt/', 'wt-')), String(sw.body.workspaceId))
-check('workspace registry actually written', workspaceCreates.length === beforeWorkspaces + 1, JSON.stringify(workspaceCreates.slice(beforeWorkspaces)))
+check('the session was moved in place', rebinds.length === beforeRebinds + 1, JSON.stringify(rebinds))
+check('moved target is the new checkout', rebinds.at(-1)[1] === sw.body.path, JSON.stringify(rebinds.at(-1)))
+// The whole point of this shape: the session keeps its workspace. Registering a
+// new workspace is exactly the bug being fixed.
+check('no workspace was registered', workspaceCreates.length === beforeWorkspaces, JSON.stringify(workspaceCreates.slice(beforeWorkspaces)))
+check('no workspaceId returned', sw.body.workspaceId === undefined, String(sw.body.workspaceId))
 check('git knows the worktree', git('worktree', 'list', '--porcelain').includes(String(sw.body.branch).replace('wt/', '.worktrees/wt-')), git('worktree', 'list', '--porcelain'))
 
 console.log('\n[15] switch — refuses what it cannot honestly do')
-const swPlain = await post('/branch-worktree/switch', { cwd: plain })
+const swPlain = await post('/branch-worktree/switch', { cwd: plain, sessionId: 'sess-live' })
 check('refuses a directory that is not a repo', swPlain.body.ok === false, JSON.stringify(swPlain.body))
-const insideWt = await post('/branch-worktree/switch', { cwd: join(repo, '.worktrees', c1Dir) })
+const swDead = await post('/branch-worktree/switch', { cwd: repo, sessionId: 'not-running' })
+check('refuses a session that is not running', swDead.body.ok === false, JSON.stringify(swDead.body))
+check('specific error code', swDead.body.code === 'switch-unavailable', swDead.body.code)
+const insideWt = await post('/branch-worktree/switch', { cwd: join(repo, '.worktrees', c1Dir), sessionId: 'sess-live' })
 check('refuses to nest a worktree of a worktree', insideWt.body.ok === false, JSON.stringify(insideWt.body))
 check('specific error code', insideWt.body.code === 'already-worktree', insideWt.body.code)
 
 console.log('\n[16] cleanup scan — only merged, clean worktrees are candidates')
 // Build two extra worktrees: one merged into master, one with unique commits.
-const mergeWt = await post('/branch-worktree/switch', { cwd: repo })
+const mergeWt = await post('/branch-worktree/switch', { cwd: repo, sessionId: 'sess-live' })
 const mergedBranch = mergeWt.body.branch
 const mergedPath = mergeWt.body.path
 git('merge', '--no-ff', mergedBranch, '-m', `merge ${mergedBranch}`)
 
 // A worktree whose branch has a commit the trunk does not have.
-const liveWt = await post('/branch-worktree/switch', { cwd: repo })
+const liveWt = await post('/branch-worktree/switch', { cwd: repo, sessionId: 'sess-live' })
 await writeFile(join(liveWt.body.path, 'only-here.txt'), 'unique\n')
 execFileSync('git', ['add', '.'], { cwd: liveWt.body.path, encoding: 'utf8' })
 execFileSync('git', ['commit', '-q', '-m', 'unique work'], { cwd: liveWt.body.path, encoding: 'utf8' })
