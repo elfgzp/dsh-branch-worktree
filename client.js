@@ -335,47 +335,6 @@ window.__ModuleLoader__.load({
         lineHeight: '16px',
         color: 'var(--dsw-alias-label-secondary)',
       },
-      /** The thin full-width bar at the very bottom of the window. */
-      statusBar: {
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 12,
-        minHeight: 26,
-        padding: '0 10px 0 14px',
-        borderTop: '0.5px solid var(--dsw-alias-border-l1)',
-        background: 'var(--dsw-alias-bg-layer-1)',
-        fontSize: 11,
-        lineHeight: '16px',
-        color: 'var(--dsw-alias-label-secondary)',
-      },
-      statusLeft: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: '1 1 auto' },
-      statusRight: { display: 'flex', alignItems: 'center', gap: 8, flex: 'none' },
-      /** Marks that the displayed directory is the agent's, not the session's. */
-      statusNote: {
-        flex: 'none',
-        padding: '0 6px',
-        borderRadius: 5,
-        background: 'var(--dsw-alias-bg-layer-3)',
-        color: 'var(--dsw-alias-label-secondary)',
-        fontSize: 10,
-        lineHeight: '15px',
-        cursor: 'help',
-      },
-      /**
-       * Long paths must stay readable from the end (the tail identifies the
-       * checkout, the prefix is shared). `direction: rtl` would do that but also
-       * moves the leading `/` to the end, so the string is truncated here
-       * instead and rendered with the normal direction.
-       */
-      statusPath: {
-        fontFamily: 'var(--dsw-alias-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
-        fontSize: 11,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        minWidth: 0,
-      },
     }
 
     /**
@@ -476,11 +435,14 @@ window.__ModuleLoader__.load({
      * therefore the only shape where the file tree, the Git view and the
      * changes list actually follow the move.
      */
-    async function switchWorkspace(cwd, sessionId) {
+    async function switchWorkspace(cwd, sessionId, path, branch) {
       const response = await fetch(new URL(`${PREFIX}/switch`, hostBase()), {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd, sessionId }),
+        // `path`/`branch` are supplied when the checkout already exists (the
+        // New-Session flow created it seconds earlier); the Host then skips
+        // repository inspection instead of building a second worktree.
+        body: JSON.stringify({ cwd, sessionId, path, branch }),
       })
       const payload = await response.json().catch(() => undefined)
       if (payload === undefined) throw httpError(response.status, 'switch-failed', '')
@@ -529,6 +491,9 @@ window.__ModuleLoader__.load({
       return function BranchWorktree(props) {
         const { t, sessionId, useSessions, useWorkspaces, useInput } = props
         const cwd = useSessions((state) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd))
+        // The whole list is needed, not just this session's cwd: after a start
+        // the new conversation has to be found among the sessions that appeared.
+        const sessions = useSessions((state) => state)
         const workspaces = useWorkspaces((state) => state)
         const draft = useInput((state) => state.draft)
 
@@ -546,6 +511,12 @@ window.__ModuleLoader__.load({
         const [preview, setPreview] = React.useState(null)
         const [creating, setCreating] = React.useState(false)
         const [failure, setFailure] = React.useState(null)
+        /**
+         * A checkout that still has to be applied to the conversation that was
+         * just started. `startSession` does not hand back a usable id, so the
+         * effect below also waits for the new session to appear in the store.
+         */
+        const [pending, setPending] = React.useState(null)
 
         /** Workspace that currently holds this Session, when listed. */
         const currentWorkspaceId = React.useMemo(() => {
@@ -636,21 +607,72 @@ window.__ModuleLoader__.load({
             )
             const uiWorkspace = services.uiWorkspace()
             if (uiWorkspace === undefined) throw httpError(0, 'create-failed', 'workspace service unavailable')
+            if (currentWorkspaceId === undefined) throw httpError(0, 'create-failed', 'workspace unavailable')
+
+            // One workspace, one conversation. The checkout the Host just made
+            // is NOT registered as a workspace — registering it is what used to
+            // add a second sidebar group on every start. Instead the session is
+            // started in the workspace the user already picked, and then moved
+            // onto the checkout.
             const options = prompt === '' ? undefined : { prompt, clearPreviousDraft: true }
+            const sessionId = uiWorkspace.startSession(currentWorkspaceId, options)
+            // Close only after the start has been issued: closing unmounts this
+            // panel, and unmounting mid-submit would drop the work below.
             setOpen(false)
-            if (result.workspaceId !== undefined && result.workspaceId !== currentWorkspaceId) {
-              uiWorkspace.startSession(result.workspaceId, options)
-            } else if (currentWorkspaceId !== undefined) {
-              uiWorkspace.startSession(currentWorkspaceId, options)
-            } else {
-              throw httpError(0, 'create-failed', 'workspace unavailable')
-            }
+
+            // Apply the directory now, or once the session exists. `startSession`
+            // may return nothing, in which case the polling helper waits for the
+            // new session id to show up before rebinding it.
+            setPending({
+              result,
+              sessionId: typeof sessionId === 'string' ? sessionId : undefined,
+              knownSessionIds: new Set(Object.keys(sessions.byId ?? {})),
+            })
           } catch (error) {
             setFailure(error.code ?? 'create-failed')
           } finally {
             setCreating(false)
           }
         }
+
+        // Apply the checkout to the conversation that was just started. This is
+        // the whole feature: pick a workspace, type a message, and the agent ends
+        // up working inside a worktree while the sidebar keeps one group.
+        React.useEffect(() => {
+          if (pending === null) return undefined
+          let alive = true
+          const run = async () => {
+            try {
+              let id = pending.sessionId
+              if (id === undefined) {
+                // No id came back: look for the session that appeared after the
+                // click. Bounded, because a session that never shows up means
+                // something else went wrong and the user should be told.
+                const deadline = Date.now() + 10_000
+                while (alive && Date.now() < deadline) {
+                  const now = Object.keys(sessions.byId ?? {})
+                  const fresh = now.find((key) => !pending.knownSessionIds.has(key))
+                  if (fresh !== undefined) { id = fresh; break }
+                  await new Promise((resolve) => setTimeout(resolve, 100))
+                }
+              }
+              if (!alive) return
+              if (id === undefined) throw httpError(0, 'switch-unavailable', 'the new session did not appear')
+              await switchWorkspace(
+                pending.result.path.startsWith('/') ? dirnameOf(pending.result.path) : cwd,
+                id,
+                pending.result.path,
+                pending.result.branch,
+              )
+            } catch (error) {
+              if (alive) setFailure(error.code ?? 'switch-unavailable')
+            } finally {
+              if (alive) setPending(null)
+            }
+          }
+          void run()
+          return () => { alive = false }
+        }, [pending, sessions, cwd])
 
         const failureText = failure === null ? null : t(ERROR_KEY[failure] ?? 'errorUnknown')
 
@@ -835,136 +857,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Build the bottom status-bar control.
+     * The directory that contains a path.
      *
-     * It answers one question the New Session chip cannot: "I am working in the
-     * main checkout right now — give me an isolated worktree without losing
-     * this conversation." The panel creates the checkout on the Host, then
-     * re-opens the Workspace, which hands the main panel to a Session bound to
-     * the new path (a Session's directory is fixed at creation, so switching in
-     * place is not a thing the Client can do), and finally sends a prompt
-     * telling the model that its files, its teammates and its subagents are now
-     * at a different path.
+     * Only used to name the repository when the checkout is already known: the
+     * Host re-inspects it, so the parent directory is what it needs, not the
+     * checkout itself.
      *
-     * @param services - late-bound client services resolved per interaction.
-     * @returns the `shell.bottom` occupant component.
+     * @param {string} path - absolute path to a file or directory.
+     * @returns {string} its parent, or the path itself when nothing precedes it.
      */
-    function createStatusBar(services) {
-      return function BranchWorktreeStatusBar(props) {
-        const { t, useSessions, useWorkspaces } = props
-        const workspaces = useWorkspaces((state) => state)
-        const sessions = useSessions((state) => state)
-
-        const [busy, setBusy] = React.useState(false)
-        const [failure, setFailure] = React.useState(null)
-        const [done, setDone] = React.useState(null)
-        /** The directory the agent now works in, once a switch has succeeded. */
-        const [moved, setMoved] = React.useState(null)
-        const sessionId = currentSessionId()
-        const cwd = sessionId === undefined ? undefined : sessions.byId?.[sessionId]?.cwd
-
-        // Whether the directory is even a Git repository is a Host fact, not
-        // something the path reveals. Asking first is what keeps the bar from
-        // offering "New worktree" in a plain folder, where the click could only
-        // ever fail.
-        const [repoState, setRepoState] = React.useState('unknown')
-        React.useEffect(() => {
-          if (cwd === undefined || cwd === '') {
-            setRepoState('none')
-            return undefined
-          }
-          let alive = true
-          setRepoState('unknown')
-          inspect(cwd).then(() => {
-            if (alive) setRepoState('repo')
-          }, () => {
-            if (alive) setRepoState('none')
-          })
-          return () => { alive = false }
-        }, [cwd])
-        const workspaceId = React.useMemo(() => {
-          if (sessionId === undefined || workspaces.phase !== 'ready') return undefined
-          for (const item of workspaces.items) {
-            if (Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionId)) return item.workspaceId
-          }
-          return undefined
-        }, [sessionId, workspaces])
-
-        // Only offer the switch when there is a real conversation sitting in a
-        // Git repository that is not already a worktree; everywhere else the
-        // bar stays out of the way entirely.
-        if (cwd === undefined || cwd === '' || repoState !== 'repo' || isWorktreePath(cwd)) return null
-
-        const switchToWorktree = async () => {
-          if (busy || sessionId === undefined) return
-          setBusy(true)
-          setFailure(null)
-          setDone(null)
-          try {
-            // Move THIS conversation. No workspace is created and no second
-            // session appears: the Host changes the running session's real
-            // directory and queues the model a notice, so the same sidebar
-            // group and the same chat stay in use.
-            const result = await switchWorkspace(cwd, sessionId)
-            setDone(result.branch)
-            setMoved(result.path)
-          } catch (error) {
-            setFailure(error.code ?? 'switch-failed')
-          } finally {
-            setBusy(false)
-          }
-        }
-
-        const label = busy
-          ? t('statusBusy')
-          : done === null
-            ? t('statusSwitch')
-            : `${t('statusDone')} ${done}`
-        const failureText = failure === null ? null : t(ERROR_KEY[failure] ?? 'errorUnknown')
-
-        return h('div', { style: S.statusBar, 'data-bw-status': 'ready' }, [
-          h('div', { key: 'left', style: S.statusLeft }, [
-            // After a switch, show the directory the AGENT is in, which is the
-            // worktree — the session's own `cwd` stays pointing at the original
-            // workspace by design.
-            h('span', { key: 'cwd', style: S.statusPath, title: moved ?? cwd }, shortPath(moved ?? cwd)),
-            moved === null ? null : h('span', { key: 'note', style: S.statusNote, title: t('statusSidebarHint') }, t('statusMovedTag')),
-          ]),
-          h('div', { key: 'right', style: S.statusRight }, [
-            failureText === null ? null : h('span', { key: 'err', style: S.error }, failureText),
-            h(Button, {
-              key: 'switch',
-              variant: 'ghost',
-              disabled: busy || workspaceId === undefined,
-              onClick: () => { void switchToWorktree() },
-            }, label),
-          ]),
-        ])
-      }
-    }
-
-    /** Read every worktree of a repository with its cleanup verdict. */
-    async function scanCleanup(cwd) {
-      const url = new URL(`${PREFIX}/cleanup`, hostBase())
-      url.searchParams.set('cwd', cwd)
-      const response = await fetch(url, { headers: { accept: 'application/json' } })
-      const payload = await response.json().catch(() => undefined)
-      if (payload === undefined) throw httpError(response.status, 'cleanup-failed', '')
-      if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
-      return payload
-    }
-
-    /** Remove one worktree and its branch. */
-    async function removeCleanup(cwd, path, deleteBranch) {
-      const response = await fetch(new URL(`${PREFIX}/cleanup/remove`, hostBase()), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cwd, path, deleteBranch }),
-      })
-      const payload = await response.json().catch(() => undefined)
-      if (payload === undefined) throw httpError(response.status, 'cleanup-failed', '')
-      if (!response.ok || payload.ok !== true) throw httpError(response.status, payload.code, payload.message)
-      return payload
+    function dirnameOf(path) {
+      if (typeof path !== 'string') return ''
+      const trimmed = path.replace(/[\\/]+$/, '')
+      const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+      return cut <= 0 ? trimmed : trimmed.slice(0, cut)
     }
 
     /**
@@ -1091,7 +997,6 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ensureOrderCss()
         const Control = createControl({ uiWorkspace: () => ctx.get('uiWorkspace') })
-        const StatusBar = createStatusBar({ uiWorkspace: () => ctx.get('uiWorkspace') })
         ctx.effect(() => ctx.locale.register(NS, 'en', DICTS.en), 'branch-worktree: dictionary (en)')
         ctx.effect(() => ctx.locale.register(NS, 'zh', DICTS.zh), 'branch-worktree: dictionary (zh)')
         ctx.effect(() => () => {
@@ -1104,13 +1009,10 @@ window.__ModuleLoader__.load({
           order: -10,
           locale: NS,
         }, Control))
-        // The bottom bar is where a user notices "I am still on the main
-        // checkout" while a conversation is already running — the New Session
-        // chip is long gone by then.
-        ctx.slots.inject('shell.bottom', () => ctx.slots.register({
-          name: 'shell.bottom',
-          locale: NS,
-        }, StatusBar))
+        // No bottom bar. Picking a workspace and typing is the only gesture that
+        // should be needed: the checkout is created and applied as part of
+        // starting the conversation, so a separate "New worktree" button would
+        // just be a second, slower way to do the same thing.
         // Worktree cleanup lives in Settings: it is a repository-wide housekeeping
         // task, not something tied to one conversation.
         const Cleanup = createCleanupSection({})

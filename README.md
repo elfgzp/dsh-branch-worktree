@@ -109,28 +109,22 @@ This is the default: **open the panel, press Start, done.**
 
 Turn **Auto name** off to get exactly the manual behavior described below.
 
-### Moving a running conversation into a new worktree
+### Starting a conversation inside a worktree
 
-The New Session chip only exists while the session is blank. Once a conversation
-is running there is a second entry point: a thin **status bar across the bottom
-of the window** shows the current working directory, and — while that directory
-is a Git repository that is not already a worktree — a **New worktree** button.
+There is one gesture: pick a workspace, tick **worktree**, and send your message.
 
-One click creates a `wt/…` worktree and moves **this conversation** onto it. No
-second workspace appears in the sidebar and no second chat is opened: the Host
-changes the running session's directory, which also queues the model a notice
-naming the new path (so uncommitted work and delegated teammates can be pointed
-there without you typing anything).
+The Host creates the checkout, the conversation starts in the workspace you
+already chose, and that session's working directory is then moved onto the
+checkout. **No second workspace appears in the sidebar and no second chat is
+opened.** Earlier versions registered the checkout as its own Workspace, which
+is why every start used to add a group to the sidebar.
 
 **What follows and what does not.** The agent really works in the new directory
-— that is DSH's `working-directory` projection. But DSH freezes a session's
-`header.cwd` when the session is created, and its own file tree, Git view and
-changes panel read that header. Those panels therefore keep showing the original
-workspace directory, and the session stays in the sidebar group it started in.
-The status bar says so explicitly once a move has happened, rather than letting
-the mismatch look like a bug.
-
-The bar hides itself once the directory is inside `.worktrees/`.
+— that is DSH's `working-directory` projection, which is why the model sees the
+worktree. But DSH freezes a session's `header.cwd` when the session is created,
+and its own file tree, Git view and changes panel read that header. Those panels
+keep showing the original workspace directory, and the session stays in the
+sidebar group it started in.
 
 ### What the worktree toggle actually does
 

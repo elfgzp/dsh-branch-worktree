@@ -229,63 +229,41 @@ localStorage.clear()
   check('chip comes BACK when switching back to a repo', c.el.querySelector('button[aria-haspopup="menu"]') !== null)
 }
 
-console.log('\n[2] status bar — hidden when already in a worktree, shown on the main checkout')
+console.log("\n[2] new session — no workspace is created, the session starts in the current one")
 {
-  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's4' }))
-  const wtPath = join(repoDir, '.worktrees', 'wt-some-branch')
-  const s4 = { sessions: { s4: { cwd: wtPath } }, workspaces: [{ workspaceId: 'w4', path: wtPath, sessionIds: ['s4'] }] }
-  const beforeD = inspectCalls.count
-  const d = await mount('shell.bottom', { ...s4, until: (el) => inspectCalls.count > beforeD && el.innerHTML.trim() === '' })
-  check('hidden inside .worktrees/', d.el.textContent.trim() === '', d.el.textContent)
-}
-{
-  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's5' }))
-  const s5 = { sessions: { s5: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w5', path: repoDir, sessionIds: ['s5'] }] }
-  const e = await mount('shell.bottom', { ...s5, until: (el) => el.innerHTML.includes('data-bw-status') })
-  const btn = [...e.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
-  check('shown on the main checkout', btn !== undefined, e.el.textContent)
-  // The bar shortens long paths to `…/last/three/segments` so the tail (which
-  // identifies the checkout) stays visible; assert on the tail, not the prefix.
-  const tail = repoDir.split('/').slice(-3).join('/')
-  check('path is displayed (tail readable)', e.el.textContent.includes(tail), e.el.textContent)
-}
+  started.length = 0
+  registeredWorkspaces.length = 0
+  localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: "s9" }))
+  const s9 = {
+    sessionId: "s9",
+    sessions: { s9: { cwd: repoDir } },
+    workspaces: [{ workspaceId: "w9", path: repoDir, sessionIds: ["s9"] }],
+    draft: "add a feature",
+  }
+  const g = await mount("conversation.hero.options", { ...s9, until: (el) => el.innerHTML.includes("aria-haspopup") })
+  const trigger = g.el.querySelector("button[aria-haspopup=\"menu\"]")
+  if (trigger === null) throw new Error("chip trigger not found")
+  await waitFor(() => !trigger.disabled)
+  await React.act(async () => { trigger.click() })
+  await settle(50)
 
-console.log('\n[2b] status bar — absent in a directory that is not a Git repository')
-{
-  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's5b' }))
-  const s5b = { sessions: { s5b: { cwd: plainDir } }, workspaces: [{ workspaceId: 'w5b', path: plainDir, sessionIds: ['s5b'] }] }
-  const beforeG = inspectCalls.count
-  const g = await mount('shell.bottom', { ...s5b, until: (el) => inspectCalls.count > beforeG && el.innerHTML.trim() === '' })
-  // The Host answers `isRepo: false` for a plain folder. Offering "New worktree"
-  // there would only produce a button that cannot ever succeed, so the whole
-  // bar hides — this regressed once, when the path alone was the only check.
-  check('bar hidden outside a Git repository', g.el.textContent.trim() === '', g.el.textContent)
-  check('no crash on the non-repo payload', !errors.some((e) => e.includes('Cannot read properties of undefined')), errors.slice(-2).join(' | '))
-}
+  const findStart = () => [...document.querySelectorAll("button")]
+    .find((b) => /从这里开始|Start here/.test(b.textContent || ""))
+  const btn = findStart()
+  if (btn === undefined) throw new Error("start button not found")
 
-console.log('\n[3] status bar — clicking moves THIS session, no new workspace')
-{
-  localStorage.setItem('dsh.sessions.current', JSON.stringify({ sessionId: 's6' }))
-  LIVE_SESSIONS.add('s6')
-  const s6 = { sessions: { s6: { cwd: repoDir } }, workspaces: [{ workspaceId: 'w6', path: repoDir, sessionIds: ['s6'] }] }
-  const f = await mount('shell.bottom', { ...s6, until: (el) => el.innerHTML.includes('data-bw-status') })
-  const btn = [...f.el.querySelectorAll('button')].find((b) => (b.textContent || '').includes('worktree'))
-  if (btn === undefined) throw new Error('switch button not found: ' + f.el.innerHTML.slice(0, 300))
-  await React.act(async () => { btn.click() })
-  await waitFor(() => switched.length > 0 || /已切到|Moved to/.test(f.el.textContent))
+  await React.act(async () => {
+    const fresh = findStart()
+    if (fresh === undefined) throw new Error("start button vanished")
+    fresh.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }))
+  })
+  // The submit does a real HTTP round-trip to a real git repository.
+  await waitFor(() => started.length > 0, 20_000)
 
-  const list = git('worktree', 'list', '--porcelain')
-  const created = list.split('\n').filter((l) => l.startsWith('worktree ') && l.includes('.worktrees/wt-'))
-  check('a worktree was created', created.length === 1, list)
-
-  // The reported bug: clicking created a SECOND workspace. The session must be
-  // moved instead, so the sidebar keeps the group the user chose.
-  check('the session was rebound in place', switched.length === 1, JSON.stringify(switched))
-  check('rebound the CURRENT session id', switched[0]?.[0] === 's6', String(switched[0]?.[0]))
-  check('rebound onto the new worktree', String(switched[0]?.[1]).includes('.worktrees/wt-'), String(switched[0]?.[1]))
-  check('no workspace was registered', registeredWorkspaces.length === 0, JSON.stringify(registeredWorkspaces))
-  check('no new session was opened', started.length === 0, JSON.stringify(started))
-  check('the bar shows the new directory', /wt-/.test(f.el.textContent), f.el.textContent)
+  // The reported bug: starting added a second sidebar group. It must not.
+  check("no workspace registered on start", registeredWorkspaces.length === 0, JSON.stringify(registeredWorkspaces))
+  check("started in the CURRENT workspace", started[0]?.[0] === "w9", "started=" + JSON.stringify(started))
+  check("the user prompt is carried over", String(started[0]?.[1]?.prompt ?? "").includes("add a feature"), JSON.stringify(started[0]?.[1]))
 }
 
 server.close()

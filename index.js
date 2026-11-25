@@ -656,6 +656,28 @@ export function apply(ctx) {
     return true
   }
 
+  /**
+   * Wait until a Session has a live Agent.
+   *
+   * The New-Session path applies the working directory immediately after the
+   * conversation is started, and at that moment the Agent may still be coming
+   * up. Giving up instantly would leave the session on the trunk — silent, and
+   * exactly the failure this feature is supposed to prevent.
+   *
+   * @param sessionId - the Session to resolve.
+   * @returns the live Agent, or undefined if it never appeared in time.
+   */
+  const waitForAgent = async (sessionId, timeoutMs = 5000, intervalMs = 100) => {
+    if (agents === undefined) return undefined
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const agent = agents.get(sessionId)
+      if (agent !== undefined) return agent
+      if (Date.now() >= deadline) return undefined
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+  }
+
   ctx.effect(() => webServer.register({
     kind: 'exact',
     path: `${PREFIX}/inspect`,
@@ -761,16 +783,14 @@ export function apply(ctx) {
           ? await ensureWorktree(status, branch, baseBranch)
           : await checkoutInPlace(status, branch)
 
-        // Registering the checkout as a Workspace is only needed by the
-        // New-Session path, which has to hand a workspace id to
-        // `uiWorkspace.startSession`. The in-place switch rebinds an EXISTING
-        // session instead and must leave the workspace list alone, so it opts
-        // out with `registerWorkspace: false`.
-        const registerWorkspace = body.registerWorkspace !== false
-        const workspaceId = registerWorkspace
-          ? (await workspaceRegistry.create(checkout.path, branch)).id
-          : undefined
-
+        // This route used to register the checkout as a Workspace so the New
+        // Session screen could hand a workspace id to `startSession`. That is
+        // what produced a second sidebar group on every start: the user picked
+        // `itfs`, and got `itfs` plus `wt/…`.
+        //
+        // Now it never registers anything. The client starts the conversation in
+        // the workspace the user already chose and then calls `/switch` to move
+        // that session's working directory onto the checkout.
         sendJson(res, 200, {
           ok: true,
           path: checkout.path,
@@ -779,7 +799,6 @@ export function apply(ctx) {
           reusedWorktree: checkout.reusedWorktree,
           worktree: useWorktree,
           repositoryRoot: status.repositoryRoot,
-          ...(workspaceId === undefined ? {} : { workspaceId }),
         })
       } catch (error) {
         const known = error instanceof BranchWorktreeError
@@ -852,7 +871,11 @@ export function apply(ctx) {
         }
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
         if (sessionId === '') throw new BranchWorktreeError('bad-request', 'sessionId is required')
-        const agent = agents.get(sessionId)
+        // The New-Session path calls this right after starting a conversation, and
+        // the agent may not be registered yet. Poll briefly instead of failing:
+        // "you clicked start and it silently stayed on master" is the exact
+        // complaint this route exists to fix.
+        const agent = await waitForAgent(sessionId)
         if (agent === undefined) {
           throw new BranchWorktreeError(
             'switch-unavailable',
@@ -860,30 +883,40 @@ export function apply(ctx) {
           )
         }
 
-        const status = await inspectRepository(body.cwd)
-        if (status.isRepo !== true) {
-          throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
-        }
-        // Already isolated: building a worktree of a worktree helps nobody.
-        if (status.cwd.includes(`${WORKTREE_DIRNAME}/`) || status.cwd.includes(`${WORKTREE_DIRNAME}\\`)) {
-          throw new BranchWorktreeError('already-worktree', 'this session is already working inside a worktree')
-        }
+        // When the checkout is already known, skip the repository inspection and
+        // branch generation entirely: the New-Session path already created it.
+        const known = typeof body.path === 'string' ? body.path : ''
+        let checkoutPath = known
+        let branchOut = typeof body.branch === 'string' ? body.branch : ''
+        let branchCreated = false
 
-        const branch = validateBranch(await generateBranchName(status))
-        const checkout = await ensureWorktree(status, branch, status.baseBranch)
+        if (checkoutPath === '') {
+          const status = await inspectRepository(body.cwd)
+          if (status.isRepo !== true) {
+            throw new BranchWorktreeError('not-a-repo', 'the workspace directory is not inside a Git repository')
+          }
+          // Already isolated: building a worktree of a worktree helps nobody.
+          if (status.cwd.includes(`${WORKTREE_DIRNAME}/`) || status.cwd.includes(`${WORKTREE_DIRNAME}\\`)) {
+            throw new BranchWorktreeError('already-worktree', 'this session is already working inside a worktree')
+          }
+          const branch = validateBranch(await generateBranchName(status))
+          const checkout = await ensureWorktree(status, branch, status.baseBranch)
+          checkoutPath = checkout.path
+          branchOut = checkout.branch
+          branchCreated = checkout.created
+        }
 
         // Move the SAME session onto the checkout. No workspace is created and
         // no second conversation appears: the session keeps its workspace
         // membership, and its real directory (the `working-directory`
         // projection) now points at the worktree.
-        const moved = await workingDirectory.set(agent, checkout.path)
+        const moved = await workingDirectory.set(agent, checkoutPath)
 
         sendJson(res, 200, {
           ok: true,
           path: moved,
-          branch: checkout.branch,
-          branchCreated: checkout.created,
-          repositoryRoot: status.repositoryRoot,
+          branch: branchOut,
+          branchCreated,
         })
       } catch (error) {
         const known = error instanceof BranchWorktreeError

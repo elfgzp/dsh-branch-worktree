@@ -114,7 +114,10 @@ check('branch auto-named under wt/', String(c1.body.branch).startsWith('wt/'), c
 check('branch created', c1.body.branchCreated === true)
 const c1Dir = String(c1.body.branch).replace('wt/', 'wt-')
 check('worktree path returned', String(c1.body.path).includes(`/.worktrees/${c1Dir}`), c1.body.path)
-check('worktree registered', c1.body.workspaceId === `ws-${c1Dir}`, c1.body.workspaceId)
+// The bug this guards: creating a checkout used to also register it as a
+// Workspace, which is what produced a second sidebar group on every start.
+check('NO workspace registered', c1.body.workspaceId === undefined, String(c1.body.workspaceId))
+check('workspace registry untouched', workspaceCreates.length === 0, JSON.stringify(workspaceCreates))
 check('repositoryRoot is the main checkout', c1.body.repositoryRoot === repoReal || c1.body.repositoryRoot === repo, c1.body.repositoryRoot)
 
 const worktreeList = git('worktree', 'list', '--porcelain')
