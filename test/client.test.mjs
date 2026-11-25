@@ -229,6 +229,24 @@ localStorage.clear()
   check('chip comes BACK when switching back to a repo', c.el.querySelector('button[aria-haspopup="menu"]') !== null)
 }
 
+console.log("\n[1b] hero chip — visible BEFORE the new session lands in the store")
+{
+  // A brand-new Session is painted before its summary exists. Reading only
+  // byId[sessionId].cwd left the chip blank on exactly the screen it is for.
+  localStorage.setItem("dsh.sessions.current", JSON.stringify({ sessionId: "s0" }))
+  const fresh = {
+    sessionId: "s0",
+    sessions: {},
+    workspaces: [{ workspaceId: "w0", path: repoDir, sessionIds: ["s0"] }],
+  }
+  const before = inspectCalls.count
+  const g = await mount("conversation.hero.options", {
+    ...fresh,
+    until: (el) => inspectCalls.count > before || el.innerHTML.includes("aria-haspopup"),
+  })
+  check("chip renders with no session summary yet", g.el.querySelector("button[aria-haspopup=\"menu\"]") !== null, g.el.innerHTML.slice(0, 200))
+}
+
 console.log("\n[2] new session — no workspace is created, the session starts in the current one")
 {
   started.length = 0

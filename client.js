@@ -490,12 +490,25 @@ window.__ModuleLoader__.load({
        */
       return function BranchWorktree(props) {
         const { t, sessionId, useSessions, useWorkspaces, useInput } = props
-        const cwd = useSessions((state) => (sessionId === undefined ? undefined : state.byId[sessionId]?.cwd))
         // The whole list is needed, not just this session's cwd: after a start
         // the new conversation has to be found among the sessions that appeared.
         const sessions = useSessions((state) => state)
         const workspaces = useWorkspaces((state) => state)
         const draft = useInput((state) => state.draft)
+
+        // A brand-new Session is rendered before its summary lands in `byId`, so
+        // reading only `state.byId[sessionId].cwd` leaves the chip blank on
+        // exactly the screen it exists for. Fall back to the directory of the
+        // Workspace that holds this Session — that is what it is about to get.
+        const sessionCwd = sessionId === undefined ? undefined : sessions.byId?.[sessionId]?.cwd
+        const workspaceCwd = React.useMemo(() => {
+          if (sessionId === undefined || workspaces.phase !== 'ready') return undefined
+          for (const item of workspaces.items) {
+            if (Array.isArray(item.sessionIds) && item.sessionIds.includes(sessionId)) return item.path
+          }
+          return undefined
+        }, [sessionId, workspaces])
+        const cwd = sessionCwd ?? workspaceCwd
 
         const [open, setOpen] = React.useState(false)
         const [status, setStatus] = React.useState({ phase: 'idle' })
